@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment={{comment}}
+Exec={{exec}}
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name=Open ADI-2 Control
+Keywords=RME;ADI-2;DAC;remote;volume;EQ;
+Terminal=false
+Type=Application

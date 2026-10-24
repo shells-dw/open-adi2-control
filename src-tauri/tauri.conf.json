@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "open-adi2-control",
+  "mainBinaryName": "open-adi2-control",
+  "version": "0.1.2",
+  "identifier": "io.github.shells-dw.openadi2control",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "category": "Music",
+    "shortDescription": "Remote for RME ADI-2 series converters",
+    "longDescription": "Controls RME ADI-2 DAC, ADI-2 Pro and ADI-2/4 Pro (all versions) over USB MIDI, or through an ADI-2-Pi on the network. Volume keys, tray icon and volume popup. Not affiliated with RME.",
+    "copyright": "shells-dw, GPL-3.0-or-later",
+    "license": "GPL-3.0-or-later",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libasound2 | libasound2t64"
+        ],
+        "section": "sound",
+        "desktopTemplate": "desktop.template"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "homepage": "https://github.com/shells-dw/open-adi2-control"
+  }
+}
