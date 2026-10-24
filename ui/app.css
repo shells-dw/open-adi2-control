@@ -125,7 +125,7 @@ main.locked .needs-unit { opacity: .45; pointer-events: none; }
 .small { font-size: 11.5px; }
 
 /* ------------------------------------------------------------ controls */
-select, input[type="text"], input[type="number"] {
+select, input[type="text"], input[type="number"], input[type="password"] {
   background: #0d0f12;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -316,3 +316,4 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
 .about b { color: var(--text); font-weight: 600; }
 .about a { color: var(--accent); text-decoration: none; }
 .about a:hover { text-decoration: underline; }
+.hint.bad { color: #f3a08f; }

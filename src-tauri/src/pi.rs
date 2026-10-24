@@ -2,6 +2,11 @@
 //! WebSocket API (docs/API.md of ADI-2-Pi, API version 1). Nothing on the Pi needs changing:
 //! this is an ordinary native client (no Origin header).
 //!
+//! When the bridge has an access key set, the key goes along as header `X-ADI2PI-Key` on the
+//! WebSocket upgrade. A missing or wrong key closes the socket with 4401: the app then stops
+//! and asks for the key (no reconnect loop, the bridge locks out after 10 wrong keys a minute);
+//! 4429 (locked out) waits 61 s.
+//!
 //! The bridge works with the same protocol integers and "addr.idx" keys as the USB engine, so
 //! its messages map straight onto the app's model. The bridge's own volume limits apply on top.
 
@@ -38,8 +43,22 @@ pub fn parse_address(addr: &str) -> Option<(String, u16)> {
     }
 }
 
-fn connect(host: &str, port: u16) -> Result<WebSocket<TcpStream>, String> {
-    let addrs: Vec<_> = (host, port).to_socket_addrs().map_err(|e| format!("can't resolve {host} ({e})"))?.collect();
+/// Why a connection ended or couldn't be made.
+#[derive(Debug, PartialEq)]
+enum Ended {
+    /// network problem, bridge restarted …: try again
+    Lost(String),
+    /// access key missing or wrong (WS close 4401 / HTTP 401): stop until the settings change
+    Auth,
+    /// too many wrong keys (WS close 4429 / HTTP 429): wait 61 s
+    Locked,
+}
+
+pub const KEY_HEADER: &str = "X-ADI2PI-Key";
+
+fn connect(host: &str, port: u16, key: &str) -> Result<WebSocket<TcpStream>, Ended> {
+    use tungstenite::client::IntoClientRequest;
+    let addrs: Vec<_> = (host, port).to_socket_addrs().map_err(|e| Ended::Lost(format!("can't resolve {host} ({e})")))?.collect();
     let mut last = String::from("no address");
     for a in addrs {
         match TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
@@ -47,7 +66,16 @@ fn connect(host: &str, port: u16) -> Result<WebSocket<TcpStream>, String> {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let host_hdr = if a.is_ipv6() { format!("[{host}]") } else { host.to_string() };
                 let url = format!("ws://{host_hdr}:{port}/ws");
-                let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| format!("WebSocket: {e}"))?;
+                let mut req = url.into_client_request().map_err(|e| Ended::Lost(e.to_string()))?;
+                if !key.is_empty() {
+                    let v = tungstenite::http::HeaderValue::from_str(key).map_err(|_| Ended::Auth)?;
+                    req.headers_mut().insert(KEY_HEADER, v);
+                }
+                let (ws, _) = tungstenite::client(req, stream).map_err(|e| match e {
+                    tungstenite::HandshakeError::Failure(tungstenite::Error::Http(r)) if r.status() == 401 => Ended::Auth,
+                    tungstenite::HandshakeError::Failure(tungstenite::Error::Http(r)) if r.status() == 429 => Ended::Locked,
+                    e => Ended::Lost(format!("WebSocket: {e}")),
+                })?;
                 ws.get_ref().set_read_timeout(Some(Duration::from_millis(50))).ok();
                 ws.get_ref().set_nodelay(true).ok();
                 return Ok(ws);
@@ -55,7 +83,13 @@ fn connect(host: &str, port: u16) -> Result<WebSocket<TcpStream>, String> {
             Err(e) => last = e.to_string(),
         }
     }
-    Err(last)
+    Err(Ended::Lost(last))
+}
+
+/// The unit's status message: `unitStatus` (bridge 1.0.0+), `status` on earlier bridges
+/// (there it is the hex string; now `status` is only an error's number).
+fn unit_status(m: &Value) -> Option<protocol::Status> {
+    to_status(&m["unitStatus"]).or_else(|| to_status(&m["status"]))
 }
 
 fn to_device(v: &Value, label: &str) -> DeviceInfo {
@@ -139,33 +173,70 @@ fn command_json(c: Command) -> Value {
     }
 }
 
-pub fn run(address: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
+/// Wait, staying responsive to Stop. false = stop.
+fn wait(rx: &Receiver<In>, d: Option<Duration>) -> bool {
+    let until = d.map(|d| Instant::now() + d);
+    loop {
+        if until.is_some_and(|u| Instant::now() >= u) {
+            return true;
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(In::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            _ => {}
+        }
+    }
+}
+
+pub fn run(address: String, key: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
     let label = format!("ADI-2-Pi at {address}");
     let Some((host, port)) = parse_address(&address) else {
         out(Update::Device(DeviceInfo { problem: Some(Problem::new("pi", format!("“{address}” is not an address"))), ..Default::default() }));
         let _ = rx.recv();
         return;
     };
-    let offline = |text: String| DeviceInfo { port: Some(label.clone()), problem: Some(Problem::new("pi", text)), ..Default::default() };
-    out(Update::Device(offline(format!("Connecting to {label}…"))));
+    let offline = |code: &str, text: String| DeviceInfo { port: Some(label.clone()), problem: Some(Problem::new(code, text)), ..Default::default() };
+    out(Update::Device(offline("pi", format!("Connecting to {label}…"))));
     loop {
-        let mut ws = match connect(&host, port) {
-            Ok(ws) => ws,
-            Err(e) => {
-                out(Update::Device(offline(format!("Can't reach ADI-2-Pi at {address}: {e}"))));
-                // wait, but stay responsive to Stop
-                let until = Instant::now() + RETRY;
-                while Instant::now() < until {
-                    match rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(In::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                        _ => {}
-                    }
-                }
-                continue;
-            }
+        let ended = match connect(&host, port, &key) {
+            Ok(ws) => session(ws, &label, &rx, &out),
+            Err(e) => e,
         };
-        out(Update::Reset);
-        let mut alive = Instant::now();
+        match ended {
+            Ended::Auth => {
+                let text = if key.is_empty() {
+                    format!("ADI-2-Pi at {address} needs an access key. Enter it under Settings → Connection.")
+                } else {
+                    format!("Access key for ADI-2-Pi at {address} is wrong. Check it under Settings → Connection.")
+                };
+                out(Update::Device(offline("pi-auth", text)));
+                // no retry loop: the bridge locks out after 10 wrong keys; a new key restarts this
+                if !wait(&rx, None) {
+                    return;
+                }
+            }
+            Ended::Locked => {
+                out(Update::Device(offline("pi-locked", format!("ADI-2-Pi at {address}: too many wrong access keys. Trying again in a minute."))));
+                if !wait(&rx, Some(Duration::from_secs(61))) {
+                    return;
+                }
+            }
+            Ended::Lost(e) if e == "stop" => return,
+            Ended::Lost(e) => {
+                out(Update::Device(offline("pi", format!("Can't reach ADI-2-Pi at {address}: {e} – trying again…"))));
+                if !wait(&rx, Some(RETRY)) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One connection, until it ends.
+fn session(mut ws: WebSocket<TcpStream>, label: &str, rx: &Receiver<In>, out: &(dyn Fn(Update) + Send)) -> Ended {
+    out(Update::Reset);
+    let mut alive = Instant::now();
+    let mut auth_err = false;
+    {
         loop {
             // commands from the app
             loop {
@@ -175,7 +246,7 @@ pub fn run(address: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
                     }
                     Ok(In::Stop) | Err(TryRecvError::Disconnected) => {
                         let _ = ws.close(None);
-                        return;
+                        return Ended::Lost("stop".into());
                     }
                     Ok(In::Link(_)) => {}
                     Err(TryRecvError::Empty) => break,
@@ -186,15 +257,15 @@ pub fn run(address: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
                     alive = Instant::now();
                     let Ok(m) = serde_json::from_str::<Value>(t.as_str()) else { continue };
                     match m["t"].as_str().unwrap_or("") {
-                        "hello" | "device" => out(Update::Device(to_device(&m["device"], &label))),
+                        "hello" | "device" => out(Update::Device(to_device(&m["device"], label))),
                         "state" => {
-                            out(Update::Device(to_device(&m["device"], &label)));
+                            out(Update::Device(to_device(&m["device"], label)));
                             out(Update::Params(to_params(&m["p"]), Origin::Device));
                             if let Some(s) = setups(&m["setups"]) {
                                 out(Update::Setups(s));
                             }
                             out(Update::Presets(to_presets(&m["eqPresets"])));
-                            if let Some(s) = to_status(&m["status"]) {
+                            if let Some(s) = unit_status(&m) {
                                 out(Update::Status(s));
                             }
                         }
@@ -206,26 +277,37 @@ pub fn run(address: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
                         }
                         "eqpresets" => out(Update::Presets(to_presets(&m["eqPresets"]))),
                         "status" => {
-                            if let Some(s) = to_status(&m["status"]) {
+                            if let Some(s) = unit_status(&m) {
                                 out(Update::Status(s));
                             }
                         }
+                        // the bridge says why before it closes
+                        "err" if m["status"] == 401 => auth_err = true,
+                        "err" if m["status"] == 429 => return Ended::Locked,
                         _ => {}
                     }
                 }
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => alive = Instant::now(),
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Close(frame)) => {
+                    let code = frame.map(|f| u16::from(f.code)).unwrap_or(0);
+                    return match code {
+                        4401 => Ended::Auth,
+                        4429 => Ended::Locked,
+                        _ if auth_err => Ended::Auth,
+                        _ => Ended::Lost("connection closed".into()),
+                    };
+                }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     // the bridge pings every 25 s
                     if alive.elapsed() > Duration::from_secs(60) {
-                        break;
+                        return Ended::Lost("no answer for 60 s".into());
                     }
                 }
-                Err(_) => break,
+                Err(_) if auth_err => return Ended::Auth,
+                Err(e) => return Ended::Lost(e.to_string()),
             }
         }
-        out(Update::Device(offline(format!("Connection to ADI-2-Pi at {address} lost – reconnecting…"))));
     }
 }
 
@@ -273,5 +355,21 @@ mod tests {
         assert_eq!(parse_address("http://192.168.1.5:8080/"), Some(("192.168.1.5".into(), 8080)));
         assert_eq!(parse_address("[fe80::1]:81"), Some(("fe80::1".into(), 81)));
         assert_eq!(parse_address(""), None);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    #[test]
+    fn unit_status_and_older_bridges() {
+        let hex = "01 00 00 00 00 00 00 00 00 02 02 0A 00 00";
+        // bridge 1.0.0+: unitStatus; status is only an error's number
+        let m = json!({ "t": "state", "unitStatus": hex, "status": 401 });
+        assert_eq!(unit_status(&m).unwrap().mode, 2);
+        // earlier bridges: status was the hex string
+        let m = json!({ "t": "state", "status": hex });
+        assert_eq!(unit_status(&m).unwrap().hex, hex);
+        assert!(unit_status(&json!({ "t": "err", "status": 401 })).is_none());
     }
 }

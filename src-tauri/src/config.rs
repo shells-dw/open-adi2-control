@@ -11,13 +11,15 @@ pub struct Connection {
     pub mode: String,
     /// ADI-2-Pi address: host[:port]
     pub pi_address: String,
+    /// ADI-2-Pi access key ('' = none); the settings file is readable by the user only
+    pub pi_key: String,
     /// demo unit: "pro" | "se" | "dac"
     pub demo_model: String,
 }
 
 impl Default for Connection {
     fn default() -> Self {
-        Connection { mode: "usb".into(), pi_address: String::new(), demo_model: "se".into() }
+        Connection { mode: "usb".into(), pi_address: String::new(), pi_key: String::new(), demo_model: "se".into() }
     }
 }
 
@@ -159,6 +161,9 @@ impl Config {
         let tmp = dir.join("config.json.tmp");
         if let Ok(s) = serde_json::to_string_pretty(self) {
             if std::fs::write(&tmp, s + "\n").is_ok() {
+                // holds the ADI-2-Pi access key
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
                 let _ = std::fs::rename(&tmp, file());
             }
         }
