@@ -2,9 +2,10 @@
 
 Remote control for RME ADI-2 series converters on Linux: ADI-2 DAC, ADI-2 Pro, ADI-2/4 Pro SE
 and their FS/EX versions. It talks to the unit over its USB-MIDI port, the same way RME's ADI-2
-Remote does on Windows, macOS and iPadOS.
+Remote does on Windows, macOS and iPadOS. It can also control a unit that is connected to an
+[ADI-2-Pi](https://github.com/shells-dw/adi2-pi) on the network.
 
-Not affiliated with RME.
+Not affiliated with RME. "RME" and "ADI-2" are trademarks of RME Intelligent Audio Solutions.
 
 ![Line Out page with a parametric EQ preset loaded](docs/screenshot.png)
 
@@ -53,14 +54,14 @@ x86-64 PCs, `arm64` for 64-bit ARM (e.g. Raspberry Pi 4/5 with a desktop).
 **Debian, Ubuntu, Mint, Pop!_OS** (Ubuntu 22.04 / Debian 12 or newer):
 
 ```sh
-sudo apt install ./open-adi2-control_0.1.2_amd64.deb
+sudo apt install ./open-adi2-control_0.1.3_amd64.deb
 ```
 
 **Other distributions**: the AppImage (glibc 2.35 or newer).
 
 ```sh
-chmod +x open-adi2-control_0.1.2_amd64.AppImage
-./open-adi2-control_0.1.2_amd64.AppImage
+chmod +x open-adi2-control_0.1.3_amd64.AppImage
+./open-adi2-control_0.1.3_amd64.AppImage
 ```
 
 Each volume key press starts the AppImage briefly, so with the volume keys the `.deb` (or a
@@ -76,6 +77,14 @@ Settings → Connection:
 - **USB on this computer** (default). The app uses the ALSA sequencer, so it works next to
   PipeWire, JACK and other MIDI programs; nothing has to be switched off. It finds the unit by
   its name and notices when it is plugged in or out.
+- **ADI-2-Pi on the network**: *Find* lists the ADI-2-Pi bridges on the network (mDNS
+  `_adi2._tcp`), or type the address (`adi2-pi.local`, `192.168.1.20`, `host:8080`). The app
+  uses the bridge's API (version 1); nothing on the Pi has to change. The bridge's own volume
+  limits apply in addition to the app's.
+  If an access key is set on the ADI-2-Pi (its System tab), enter it under *Access key*. A
+  missing or wrong key stops the connection with a message instead of retrying; after 10 wrong
+  keys within a minute the bridge refuses connections for a minute, and the app waits that long.
+  The key is kept in the settings file, readable only by your user.
 - **Demo**: a simulated ADI-2/4 Pro SE, ADI-2 Pro or ADI-2 DAC.
 
 ## Volume keys
