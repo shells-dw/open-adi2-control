@@ -1,0 +1,21 @@
+{
+  "name": "open-adi2-control",
+  "version": "0.1.2",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "description": "Remote control for RME ADI-2 series converters on Linux",
+  "homepage": "https://github.com/shells-dw/open-adi2-control",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shells-dw/open-adi2-control.git"
+  },
+  "author": "shells-dw"
+}

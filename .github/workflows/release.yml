@@ -1,0 +1,83 @@
+# Builds the release packages when a tag vX.Y.Z is pushed, and attaches them to a draft
+# release whose text comes from RELEASE-NOTES-X.Y.Z.md. Publish the draft on GitHub afterwards.
+# Built on Ubuntu 22.04, so the packages run on glibc 2.35 and newer.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.2)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${TAG#v}"
+          NOTES="RELEASE-NOTES-${VER}.md"
+          [ -f "$NOTES" ] || { echo "missing $NOTES"; exit 1; }
+          grep -q "\"version\": \"${VER}\"" src-tauri/tauri.conf.json || { echo "tauri.conf.json is not version ${VER}"; exit 1; }
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --draft --verify-tag --title "Open ADI-2 Control ${VER}" --notes-file "$NOTES"
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libasound2-dev libssl-dev build-essential file xdg-utils patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build
+        run: |
+          npm ci
+          npx tauri build
+      - name: Collect
+        run: |
+          VER="${TAG#v}"
+          mkdir dist
+          cp src-tauri/target/release/bundle/deb/*.deb "dist/open-adi2-control_${VER}_${{ matrix.arch }}.deb"
+          cp src-tauri/target/release/bundle/appimage/*.AppImage "dist/open-adi2-control_${VER}_${{ matrix.arch }}.AppImage"
+          cd dist && sha256sum * > "SHA256SUMS-${{ matrix.arch }}.txt" && cat "SHA256SUMS-${{ matrix.arch }}.txt"
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
