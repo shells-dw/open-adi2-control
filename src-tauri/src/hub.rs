@@ -80,7 +80,8 @@ impl Hub {
         match conn.mode.as_str() {
             "pi" => {
                 let addr = conn.pi_address.clone();
-                std::thread::Builder::new().name("adi2-pi".into()).spawn(move || pi::run(addr, rx, out)).ok();
+                let key = conn.pi_key.trim().to_string();
+                std::thread::Builder::new().name("adi2-pi".into()).spawn(move || pi::run(addr, key, rx, out)).ok();
             }
             "demo" => {
                 let t = mock::start(&conn.demo_model, tx.clone());

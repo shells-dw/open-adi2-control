@@ -944,19 +944,36 @@
     // connection
     const mode = cfg.connection.mode;
     const addr = h('input', { type: 'text', placeholder: 'adi2-pi.local or 192.168.1.20', value: cfg.connection.pi_address, style: { width: '240px' } });
+    const keyIn = h('input', { type: 'password', placeholder: 'only if set on the ADI-2-Pi', value: cfg.connection.pi_key || '', autocomplete: 'off', style: { width: '240px' }, 'aria-label': 'Access key' });
+    const keyShow = h('button', { class: 'btn', title: 'Show or hide the key', onclick: () => { keyIn.type = keyIn.type === 'password' ? 'text' : 'password'; } }, '👁');
+    const keyState = h('div', { class: 'hint', style: { margin: '4px 0 0' } });
+    const drawKeyState = () => {
+      const p = S.device.problem;
+      const pi = S.config.connection.mode === 'pi';
+      keyState.className = `hint${pi && p && (p.code === 'pi-auth' || p.code === 'pi-locked') ? ' bad' : ''}`;
+      keyState.textContent = pi && p && (p.code === 'pi-auth' || p.code === 'pi-locked') ? p.text
+        : pi && S.device.connected && S.config.connection.pi_key ? 'Key accepted.' : 'Set on the ADI-2-Pi\'s System tab. Leave empty if the bridge has none.';
+    };
+    drawKeyState();
+    pageSubs.add(drawKeyState);
+    const connectPi = () => {
+      if (!addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); return; }
+      saveConfig({ connection: { mode: 'pi', pi_address: addr.value.trim(), pi_key: keyIn.value.trim() } });
+    };
+    keyIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectPi(); });
     const found = h('div', { class: 'found' });
     const find = h('button', { class: 'btn', onclick: () => {
       find.disabled = true;
       found.replaceChildren(h('span', { class: 'hint' }, 'Looking for ADI-2-Pi on the network…'));
       invoke('discover').then((list) => {
-        found.replaceChildren(...(list.length ? list.map((f) => h('button', { class: 'btn', onclick: () => { addr.value = f.address; saveConfig({ connection: { mode: 'pi', pi_address: f.address } }); } },
+        found.replaceChildren(...(list.length ? list.map((f) => h('button', { class: 'btn', onclick: () => { addr.value = f.address; connectPi(); } },
           `${f.name} – ${f.address}${f.ip ? ` (${f.ip})` : ''}`)) : [h('span', { class: 'hint' }, 'None found. Type the address instead.')]));
       }).catch((e) => found.replaceChildren(h('span', { class: 'hint' }, String(e)))).finally(() => { find.disabled = false; });
     } }, 'Find');
-    const radio = (v, label, small, extra) => h('label', null,
+    const radio = (v, label, small, ...extra) => h('label', null,
       h('input', { type: 'radio', name: 'mode', value: v, checked: mode === v, onchange: () => {
         if (v === 'pi' && !addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); return; }
-        saveConfig({ connection: { mode: v, pi_address: addr.value.trim() } });
+        saveConfig({ connection: { mode: v, pi_address: addr.value.trim(), pi_key: keyIn.value.trim() } });
       } }),
       h('div', null, h('div', null, label), small ? h('div', { class: 'hint', style: { margin: 0 } }, small) : null, extra));
     const conn = h('section', { class: 'panel' }, h('h2', null, 'Connection'),
@@ -964,7 +981,9 @@
         radio('usb', 'USB on this computer', 'Through the ALSA sequencer, next to PipeWire or JACK. Set MIDI Control to ON on the unit.'),
         radio('pi', 'ADI-2-Pi on the network', 'An ADI-2 connected to a Raspberry Pi running ADI-2-Pi. The bridge\'s own volume limits apply too.',
           h('div', { class: 'inline', style: { marginTop: '6px' } }, addr, find,
-            h('button', { class: 'btn', onclick: () => { if (addr.value.trim()) saveConfig({ connection: { mode: 'pi', pi_address: addr.value.trim() } }); } }, 'Connect')), found),
+            h('button', { class: 'btn', onclick: connectPi }, 'Connect')),
+          h('div', { class: 'inline', style: { marginTop: '6px' } }, keyIn, keyShow, h('span', { class: 'lab' }, 'Access key')),
+          keyState, found),
         radio('demo', 'Demo', 'A simulated unit, to look around without one.',
           h('div', { class: 'inline', style: { marginTop: '6px' } }, cfgSelect('connection.demo_model', [['se', 'ADI-2/4 Pro SE'], ['pro', 'ADI-2 Pro'], ['dac', 'ADI-2 DAC']], 'Demo model')))));
 
@@ -1025,12 +1044,14 @@
         h('div', null, 'Updates, help and bug reports: ',
           h('a', { href: '#', onclick: (e) => { e.preventDefault(); invoke('open_project_page').catch((err) => toast(err, true)); } }, 'github.com/shells-dw/open-adi2-control'))));
 
+    const statusCode = h('code', null, S.status ? S.status.hex : '–');
+    pageSubs.add(() => { statusCode.textContent = S.status ? S.status.hex : '–'; });
     const status = h('section', { class: 'panel' }, h('h2', null, 'Unit'),
       h('table', { class: 'tbl' },
         h('tr', null, h('td', null, 'Model'), h('td', null, S.device.model ? S.schema.modelNames[S.device.model] : '–')),
         h('tr', null, h('td', null, 'Device ID'), h('td', null, S.device.id ? `0x${S.device.id.toString(16)}` : '–')),
         h('tr', null, h('td', null, 'Connected through'), h('td', null, S.device.port || '–')),
-        h('tr', null, h('td', null, 'Status message'), h('td', null, h('code', null, S.status ? S.status.hex : '–')))),
+        h('tr', null, h('td', null, 'Status message'), h('td', null, statusCode))),
       h('div', { class: 'inline', style: { marginTop: '8px' } }, h('button', { class: 'btn', onclick: () => invoke('refresh').then(() => toast('Reading all settings again')).catch((e) => toast(e, true)) }, 'Read everything again')));
 
     return h('div', { class: 'page' }, h('div', { class: 'row2' }, conn, keys), h('div', { class: 'row2' }, vol, popup), h('div', { class: 'row2' }, app, status));
@@ -1117,6 +1138,7 @@
       case 'device': {
         S.device = u.device;
         renderConn();
+        if (S.page === 'settings') for (const fn of pageSubs) fn();
         const sh = shape();
         if (sh !== lastShape) { lastShape = sh; renderTabs(); drawPage(); }
         break;
@@ -1145,6 +1167,7 @@
         break;
       case 'status':
         S.status = u.status;
+        if (S.page === 'settings') for (const fn of pageSubs) fn();
         break;
       case 'config': {
         const modeChanged = S.config && JSON.stringify(S.config.connection) !== JSON.stringify(u.config.connection);
