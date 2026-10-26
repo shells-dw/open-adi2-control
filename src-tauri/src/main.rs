@@ -4,9 +4,14 @@
 //!   open-adi2-control --hidden            start in the tray only
 //!   open-adi2-control volume-up | volume-down | mute
 //!                                    for the desktop's volume keys (see keys.rs)
+//!   open-adi2-control get [ch [id]] | set <ch> <id> <value> [R] | setup <n> | preset <ch> <n>
+//!                                    control from scripts; answered by the running app
 
 mod config;
+mod dbus;
 mod device;
+mod eqfile;
+mod hpeq;
 mod hub;
 mod keys;
 mod mock;
@@ -17,6 +22,8 @@ mod protocol;
 mod schema;
 mod seq;
 mod tray;
+mod update;
+mod wake;
 
 use config::Config;
 use hub::Hub;
@@ -164,8 +171,15 @@ fn set_config(app: AppHandle, hub: tauri::State<Arc<Hub>>, patch: Value) -> Res<
             tray::remove(&app);
         }
     }
-    if new.connection != old.connection {
+    if new.unit() != old.unit() {
         hub.inner().connect();
+    }
+    if new.volume.profile != old.volume.profile || new.volume.profiles != old.volume.profiles {
+        hub.inner().apply_limits();
+    }
+    if new.updates.check && !old.updates.check {
+        let h = hub.inner().clone();
+        std::thread::spawn(move || h.check_updates(false));
     }
     tray::refresh(&app);
     hub.emit_config();
@@ -201,12 +215,139 @@ fn osd_style() -> &'static str {
     osd::auto_style()
 }
 
-pub const PROJECT_URL: &str = "https://github.com/shells-dw/open-adi2-control";
+pub const PROJECT_URL: &str = update::REPO_URL;
 
-/// The project page in the default browser (only this fixed address).
+/// Open a link of this project in the default browser: the project page or one of its releases.
+pub fn open_link(url: &str) -> Res<()> {
+    if url != PROJECT_URL && !update::trusted(url) {
+        return Err("not a link of this project".into());
+    }
+    keys::host_command("xdg-open").arg(url).spawn().map(|_| ()).map_err(|e| format!("can't start xdg-open: {e}"))
+}
+
+/// Window messages to stderr (debug builds; the webview's console isn't visible otherwise).
+#[tauri::command]
+fn ui_log(msg: String) {
+    if cfg!(debug_assertions) {
+        eprintln!("ui: {msg}");
+    }
+}
+
 #[tauri::command]
 fn open_project_page() -> Res<()> {
-    std::process::Command::new("xdg-open").arg(PROJECT_URL).spawn().map(|_| ()).map_err(|e| format!("can't start xdg-open: {e}"))
+    open_link(PROJECT_URL)
+}
+
+pub const ADI2_PI_URL: &str = "https://github.com/shells-dw/adi2-pi";
+
+#[tauri::command]
+fn open_adi2_pi_page() -> Res<()> {
+    keys::host_command("xdg-open").arg(ADI2_PI_URL).spawn().map(|_| ()).map_err(|e| format!("can't start xdg-open: {e}"))
+}
+
+/// Let the user pick a text file; Ok(None) when cancelled.
+#[tauri::command]
+async fn pick_file(app: AppHandle, title: String, ext: Vec<String>, label: String) -> Res<Option<(String, String)>> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+        let mut d = app.dialog().file().set_title(&title).add_filter(&label, &ext);
+        if let Some(w) = app.get_webview_window("main") {
+            d = d.set_parent(&w);
+        }
+        d.blocking_pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(path) = path.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() > 8 << 20 {
+        return Err("the file is too large".into());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("can't read the file: {e}"))?;
+    Ok(Some((path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), text)))
+}
+
+/// Save text under a name the user picks; Ok(None) when cancelled.
+#[tauri::command]
+async fn save_file(app: AppHandle, title: String, name: String, ext: Vec<String>, label: String, text: String) -> Res<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+        let mut d = app.dialog().file().set_title(&title).set_file_name(&name).add_filter(&label, &ext);
+        if let Some(w) = app.get_webview_window("main") {
+            d = d.set_parent(&w);
+        }
+        d.blocking_save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(path) = path.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    std::fs::write(&path, text).map_err(|e| format!("can't write the file: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// The unit's EQ presets as a .adieqpr file (ADI-2 Remote's format). Empty slots are skipped
+/// unless `slots` names them.
+#[tauri::command]
+fn export_presets(hub: tauri::State<Arc<Hub>>, slots: Option<Vec<u8>>) -> Res<String> {
+    let m = hub.model.lock().unwrap();
+    let list: Vec<_> = m
+        .presets
+        .iter()
+        .filter(|p| match &slots {
+            Some(s) => s.contains(&p.n),
+            None => p.empty == Some(false),
+        })
+        .cloned()
+        .collect();
+    if list.is_empty() {
+        return Err("no presets to export".into());
+    }
+    Ok(eqfile::write(&list))
+}
+
+/// Presets given by the window (headphone EQ result) as a .adieqpr file.
+#[tauri::command]
+fn write_presets(presets: Vec<model::Preset>) -> Res<String> {
+    if presets.is_empty() || presets.iter().any(|p| !(1..=20).contains(&p.n)) {
+        return Err("no presets to write".into());
+    }
+    Ok(eqfile::write(&presets))
+}
+
+/// The presets in a .adieqpr file, for the import dialog.
+#[tauri::command]
+fn parse_presets(text: String) -> Res<Vec<model::Preset>> {
+    eqfile::read(&text)
+}
+
+#[tauri::command]
+fn open_release_link(url: String) -> Res<()> {
+    open_link(&url)
+}
+
+#[tauri::command]
+async fn update_check(hub: tauri::State<'_, Arc<Hub>>) -> Res<Value> {
+    let h = hub.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        h.check_updates(false);
+        h.update_view()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_skip(hub: tauri::State<Arc<Hub>>, version: String) -> Value {
+    {
+        let mut cfg = hub.cfg.lock().unwrap();
+        cfg.updates.skip = version;
+        cfg.save();
+    }
+    hub.emit_config();
+    tray::refresh(&hub.app_handle());
+    hub.update_view()
 }
 
 #[tauri::command]
@@ -217,28 +358,51 @@ fn key_action(hub: tauri::State<Arc<Hub>>, action: String) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let hidden = args.iter().any(|a| a == "--hidden");
-    if let Some(action) = args.iter().find(|a| keys::ACTIONS.contains(&a.as_str())) {
+    if let Some(action) = args.first().filter(|a| keys::ACTIONS.contains(&a.as_str())) {
         // from a volume key: to the running app, else the system volume
         if !keys::send_to_running(action) {
             keys::system_volume(action);
         }
         return;
     }
+    if matches!(args.first().map(String::as_str), Some("get" | "set" | "setup" | "preset" | "refresh" | "ping")) {
+        match keys::ask_running(&args) {
+            Some(Ok(t)) => println!("{t}"),
+            Some(Err(t)) => {
+                eprintln!("{t}");
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("Open ADI-2 Control is not running");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: open-adi2-control [--hidden] | volume-up | volume-down | mute");
+        println!(concat!(
+            "usage: open-adi2-control [--hidden]\n",
+            "       open-adi2-control volume-up | volume-down | mute\n",
+            "       open-adi2-control get [line|ph12|ph34|in|device [id [R]]]\n",
+            "       open-adi2-control set <line|ph12|ph34|in|device> <id> <value> [R]\n",
+            "           value: a number (+1 / -=1 relative), on/off/toggle, a choice by name or index, next/prev\n",
+            "       open-adi2-control setup <1-9> | preset <output> <1-20|manual|temp> | refresh\n",
+            "       ids: see src-tauri/schema.json (vol, mute, dim, src, eqen, eqpreset, b1g …)"
+        ));
         return;
     }
     if args.iter().any(|a| a == "--version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // already running: show its window
-    if keys::send_to_running("show") {
+    // already running: show its window (a second autostart just ends)
+    if keys::send_to_running(if hidden { "ping" } else { "show" }) {
         return;
     }
 
     let cfg = Config::load();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             snapshot,
             schema_json,
@@ -253,6 +417,18 @@ fn main() {
             osd_test,
             osd_style,
             open_project_page,
+            ui_log,
+            hpeq::eq_index,
+            hpeq::eq_file,
+            open_adi2_pi_page,
+            pick_file,
+            save_file,
+            export_presets,
+            parse_presets,
+            write_presets,
+            open_release_link,
+            update_check,
+            update_skip,
             key_action
         ])
         .setup(move |app| {
@@ -267,20 +443,21 @@ fn main() {
                 }
             }
             let h2 = handle.clone();
-            if let Err(e) = keys::serve(move |cmd| {
-                let h3 = h2.clone();
-                match cmd.as_str() {
-                    "show" => {
-                        let h4 = h3.clone();
-                        let _ = h3.run_on_main_thread(move || show_main(&h4));
-                    }
-                    a if keys::ACTIONS.contains(&a) => h3.state::<Arc<Hub>>().inner().key_action(a, true),
-                    _ => {}
-                }
-            }) {
+            if let Err(e) = keys::serve(move |args| h2.state::<Arc<Hub>>().inner().cli(&args)) {
                 eprintln!("command socket: {e}");
             }
             hub.connect();
+            hub.start_update_timer();
+            wake::start(hub.clone());
+            dbus::start(hub.clone());
+            // the autostart entry and the GNOME key bindings name the executable: keep them
+            // pointing at this one (an AppImage may have been renamed or replaced)
+            if cfg.autostart {
+                let _ = set_autostart(true);
+            }
+            if cfg.keys.enabled {
+                std::thread::spawn(keys::gnome_refresh_commands);
+            }
             if !(hidden || (cfg.start_hidden && cfg.tray)) {
                 show_main(&handle);
             }

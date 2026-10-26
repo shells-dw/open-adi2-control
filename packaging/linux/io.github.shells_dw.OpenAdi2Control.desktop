@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories=Audio;AudioVideo;Music;
+Comment=Remote for RME ADI-2 series converters
+Exec=open-adi2-control
+StartupWMClass=open-adi2-control
+Icon=open-adi2-control
+Name=Open ADI-2 Control
+Keywords=RME;ADI-2;DAC;remote;volume;EQ;
+Terminal=false
+Type=Application

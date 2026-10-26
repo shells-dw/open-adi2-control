@@ -12,6 +12,7 @@
 use crate::config::{Config, GnomeSaved};
 use crate::osd;
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,46 +23,102 @@ pub const ACTIONS: [&str; 3] = ["volume-up", "volume-down", "mute"];
 pub fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d).join("open-adi2-control.sock"),
-        None => std::env::temp_dir().join(format!("open-adi2-control-{}.sock", unsafe_uid())),
+        None => std::env::temp_dir().join(format!("open-adi2-control-{}.sock", uid())),
     }
 }
 
-fn unsafe_uid() -> String {
-    std::env::var("UID").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "user".into())
+fn uid() -> u32 {
+    std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
 }
 
-/// Send a command to the running app. Ok = it took it.
-pub fn send_to_running(cmd: &str) -> bool {
-    let Ok(mut s) = UnixStream::connect(socket_path()) else { return false };
+/// A program of the host system. Inside an AppImage, the variables its AppRun sets for the
+/// bundled GTK and GLib (schema dir, GIO modules, GTK paths, LD_LIBRARY_PATH) are removed, so
+/// gsettings, wpctl, pactl and xdg-open run with the system's own libraries and schemas.
+pub fn host_command(program: &str) -> Command {
+    let mut c = Command::new(program);
+    if std::env::var_os("APPDIR").is_some() {
+        for v in [
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "GSETTINGS_SCHEMA_DIR",
+            "GIO_MODULE_DIR",
+            "GI_TYPELIB_PATH",
+            "GTK_PATH",
+            "GTK_EXE_PREFIX",
+            "GTK_DATA_PREFIX",
+            "GTK_IM_MODULE_FILE",
+            "GDK_PIXBUF_MODULE_FILE",
+            "GTK_THEME",
+            "PYTHONHOME",
+            "PYTHONPATH",
+        ] {
+            c.env_remove(v);
+        }
+        if let (Ok(appdir), Ok(dirs)) = (std::env::var("APPDIR"), std::env::var("XDG_DATA_DIRS")) {
+            let kept: Vec<&str> = dirs.split(':').filter(|d| !d.starts_with(&appdir) && !d.is_empty()).collect();
+            if kept.is_empty() {
+                c.env_remove("XDG_DATA_DIRS");
+            } else {
+                c.env("XDG_DATA_DIRS", kept.join(":"));
+            }
+        }
+    }
+    c
+}
+
+/// Send a command line to the running app: `Some(Ok(text))` / `Some(Err(text))` from the app,
+/// `None` when no app answers. The line is the arguments as JSON (an array of strings).
+pub fn ask_running(args: &[String]) -> Option<Result<String, String>> {
+    let Ok(mut s) = UnixStream::connect(socket_path()) else { return None };
     s.set_write_timeout(Some(Duration::from_millis(500))).ok();
-    s.set_read_timeout(Some(Duration::from_millis(1500))).ok();
-    if s.write_all(format!("{cmd}\n").as_bytes()).is_err() {
-        return false;
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let line = serde_json::to_string(args).ok()?;
+    s.write_all(format!("{line}\n").as_bytes()).ok()?;
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).ok()?;
+    let reply = reply.trim_end_matches('\n');
+    if let Some(t) = reply.strip_prefix("ok ") {
+        Some(Ok(t.to_string()))
+    } else if reply == "ok" {
+        Some(Ok(String::new()))
+    } else if let Some(t) = reply.strip_prefix("err ") {
+        Some(Err(t.to_string()))
+    } else {
+        None
     }
-    let mut reply = [0u8; 2];
-    matches!(s.read(&mut reply), Ok(n) if n > 0)
 }
 
-/// Listen for commands; `handle` runs for each line.
-pub fn serve(handle: impl Fn(String) + Send + 'static) -> std::io::Result<()> {
+/// One command, no reply needed. true = the running app took it.
+pub fn send_to_running(cmd: &str) -> bool {
+    ask_running(&[cmd.to_string()]).is_some()
+}
+
+/// Listen for command lines; `handle` returns the reply (Ok/Err text).
+pub fn serve(handle: impl Fn(Vec<String>) -> Result<String, String> + Send + 'static) -> std::io::Result<()> {
     let path = socket_path();
     // a socket left over from a crash: nobody answers on it
     if path.exists() && UnixStream::connect(&path).is_err() {
         let _ = std::fs::remove_file(&path);
     }
     let listener = UnixListener::bind(&path)?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     std::thread::Builder::new().name("commands".into()).spawn(move || {
         for conn in listener.incoming().flatten() {
             let mut conn = conn;
             conn.set_read_timeout(Some(Duration::from_millis(500))).ok();
-            let mut buf = [0u8; 64];
-            if let Ok(n) = conn.read(&mut buf) {
-                let line = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                let _ = conn.write_all(b"ok");
-                if !line.is_empty() {
-                    handle(line);
-                }
+            let mut buf = vec![0u8; 4096];
+            let Ok(n) = conn.read(&mut buf) else { continue };
+            let line = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            let args: Vec<String> = serde_json::from_str(&line).unwrap_or_else(|_| line.split_whitespace().map(String::from).collect());
+            if args.is_empty() {
+                continue;
             }
+            let reply = match handle(args) {
+                Ok(t) => format!("ok {t}\n"),
+                Err(t) => format!("err {t}\n"),
+            };
+            let _ = conn.write_all(reply.as_bytes());
+            let _ = conn.shutdown(std::net::Shutdown::Write);
         }
     })?;
     Ok(())
@@ -74,7 +131,7 @@ pub fn remove_socket() {
 // ---------------------------------------------------------------- system volume
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).output().ok()?;
+    let out = host_command(cmd).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -251,6 +308,22 @@ pub fn gnome_restore(cfg: &mut Config) {
 pub fn gnome_active() -> bool {
     let list = parse_strv(&gsettings(&["get", MK, "custom-keybindings"]).unwrap_or_default());
     our_paths().iter().all(|p| list.contains(p))
+}
+
+/// The bindings' commands name the executable; after an AppImage was renamed or replaced,
+/// point them at the current one.
+pub fn gnome_refresh_commands() {
+    if !gnome_active() {
+        return;
+    }
+    for a in ACTIONS {
+        let schema = format!("{CUSTOM}:{PATH_BASE}{a}/");
+        let want = command_line(a);
+        let have = gsettings(&["get", &schema, "command"]).unwrap_or_default();
+        if have.trim_matches('\'') != want {
+            gsettings(&["set", &schema, "command", &want]);
+        }
+    }
 }
 
 #[derive(serde::Serialize)]

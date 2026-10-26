@@ -297,11 +297,26 @@ pub struct Status {
     pub active_out: u8,
     pub revision: u8,
     pub active_line: u8,
+    /// byte 6 bit 6 ("Phones 3/4 active" in RME's table; seen as 0 while PH 3/4 played)
+    pub ph34_active: bool,
+    /// IOStatus1 / IOStatus2, 28-bit words (bytes 7–10 / 11–14, 7 bits each)
+    pub io1: u32,
+    pub io2: u32,
+    /// IOStatus1 bits 23+21: the AES input has a valid signal (Pro models; seen on an ADI-2 Pro EX)
+    pub aes_in: bool,
+    /// IOStatus1 bits 24+22: the SPDIF input chosen under SPDIF In has a valid signal (Pro models)
+    pub spdif_in: bool,
     /// current device mode (byte 15 bits 2–0)
     pub mode: u8,
     pub balanced: bool,
     pub dsd: u8,
     pub protocol: u8,
+    /// bytes after the protocol revision (the ADI-2 Pro EX sends more than the table lists)
+    pub extra: String,
+}
+
+fn word28(b: &[u8]) -> u32 {
+    ((b[0] as u32 & 0x7f) << 21) | ((b[1] as u32 & 0x7f) << 14) | ((b[2] as u32 & 0x7f) << 7) | (b[3] as u32 & 0x7f)
 }
 
 pub fn parse_status(data: &[u8]) -> Option<Status> {
@@ -310,15 +325,23 @@ pub fn parse_status(data: &[u8]) -> Option<Status> {
     }
     let b6 = data[0];
     let b15 = data[9];
+    let io1 = word28(&data[1..5]);
+    let bit = |w: u32, n: u32| w & (1 << n) != 0;
     Some(Status {
         hex: hex(data),
         active_out: b6 & 0x3,
         revision: (b6 >> 2) & 0x3,
         active_line: (b6 >> 4) & 0x3,
+        ph34_active: b6 & 0x40 != 0,
+        io1,
+        io2: word28(&data[5..9]),
+        aes_in: bit(io1, 23) && bit(io1, 21),
+        spdif_in: bit(io1, 24) && bit(io1, 22),
         mode: b15 & 0x7,
         balanced: b15 & 0x8 != 0,
         dsd: (b15 >> 4) & 0x7,
         protocol: data[10],
+        extra: hex(&data[11.min(data.len())..]),
     })
 }
 

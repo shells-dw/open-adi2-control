@@ -162,6 +162,17 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
                 let mut s = shared.lock().unwrap();
                 let seq = s.seq.as_ref().unwrap();
                 let found = find_adi(seq);
+                // the unit came back under another address (unplugged and plugged in again
+                // within one poll): close the old connection first
+                if let (Some(f), Some(cur)) = (&found, s.adi) {
+                    if f.addr != cur {
+                        s.adi = None;
+                        drop(s);
+                        send(&engine, LinkEvent::Closed("unplugged".into()));
+                        rescan = true;
+                        continue;
+                    }
+                }
                 match (found, s.adi) {
                     (Some(f), None) => {
                         let me = Addr { client: seq.client_id().unwrap_or(0), port: s.my_port };

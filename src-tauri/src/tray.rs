@@ -10,7 +10,7 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 const TRAY_ID: &str = "main";
 static PENDING: AtomicBool = AtomicBool::new(false);
@@ -109,6 +109,20 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
     menu.append(&tgt)?;
 
+    if cfg.volume.profiles.len() > 1 {
+        let pr = Submenu::with_id(app, "profiles", "Volume limits", true)?;
+        for (i, p) in cfg.volume.profiles.iter().enumerate() {
+            pr.append(&CheckMenuItem::with_id(app, format!("profile:{i}"), &p.name, true, cfg.volume.profile == i, None::<&str>)?)?;
+        }
+        menu.append(&pr)?;
+    }
+    if cfg.units.len() > 1 {
+        let un = Submenu::with_id(app, "units", "Unit", true)?;
+        for (i, u) in cfg.units.iter().enumerate() {
+            un.append(&CheckMenuItem::with_id(app, format!("unit:{i}"), u.label(), true, cfg.active == i, None::<&str>)?)?;
+        }
+        menu.append(&un)?;
+    }
     let su = Submenu::with_id(app, "setups", "Load setup", usable)?;
     for (i, name) in setups.iter().enumerate() {
         let label = if name.is_empty() { format!("{}", i + 1) } else { format!("{} · {name}", i + 1) };
@@ -116,6 +130,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
     menu.append(&su)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    if let Some(r) = hub.update_offer() {
+        menu.append(&MenuItem::with_id(app, "update", format!("Version {} available…", r.version), true, None::<&str>)?)?;
+    }
     menu.append(&MenuItem::with_id(app, "show", "Show window", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?)?;
     Ok(menu)
@@ -139,6 +156,11 @@ fn on_menu(app: &AppHandle, ev: MenuEvent) {
         "dim" => toggle(|c| key(c.addr, ids::DIM)),
         "eq" => toggle(|c| key(c.eq, ids::EQ_ENABLE)),
         "show" => crate::show_main(app),
+        "update" => {
+            if let Some(r) = hub.update_offer() {
+                let _ = crate::open_link(&r.url);
+            }
+        }
         "quit" => crate::quit(app),
         _ => {
             if let Some(t) = id.strip_prefix("tgt:") {
@@ -148,7 +170,25 @@ fn on_menu(app: &AppHandle, ev: MenuEvent) {
                 drop(cfg);
                 hub.emit_config();
             } else if let Some(n) = id.strip_prefix("setup:").and_then(|n| n.parse::<u8>().ok()) {
-                let _ = hub.command(Command::LoadSetup(n));
+                // the window asks for confirmation
+                crate::show_main(app);
+                let _ = app.emit("ask", serde_json::json!({ "setup": n }));
+            } else if let Some(i) = id.strip_prefix("profile:").and_then(|n| n.parse::<usize>().ok()) {
+                hub.set_profile(i);
+            } else if let Some(i) = id.strip_prefix("unit:").and_then(|n| n.parse::<usize>().ok()) {
+                let changed = {
+                    let mut cfg = hub.cfg.lock().unwrap();
+                    let ok = i < cfg.units.len() && cfg.active != i;
+                    if ok {
+                        cfg.active = i;
+                        cfg.save();
+                    }
+                    ok
+                };
+                if changed {
+                    hub.emit_config();
+                    hub.connect();
+                }
             }
         }
     }

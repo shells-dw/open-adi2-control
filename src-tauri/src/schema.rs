@@ -122,3 +122,130 @@ mod tests {
         assert!(!available(param("device", "basic").unwrap(), "dac"));
     }
 }
+
+/// Value names of a select parameter for a model and channel (per-model and line/phones lists).
+pub fn value_names(p: &Value, model: &str, ch: Option<&Channel>) -> Option<Vec<String>> {
+    let mut n = p.get("names")?;
+    if n.is_object() && (n.get("line").is_some() || n.get("phones").is_some()) {
+        n = if ch.is_some_and(|c| c.key == "line") { &n["line"] } else { &n["phones"] };
+    }
+    if n.is_object() {
+        n = n.get(model).or_else(|| n.get("pro")).or_else(|| n.as_object().and_then(|o| o.values().next()))?;
+    }
+    Some(n.as_array()?.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+}
+
+/// A parameter by channel key ("line", "ph12", "ph34", "in", "device") and id.
+pub struct Resolved {
+    pub addr: u8,
+    pub idx: u8,
+    pub param: &'static Value,
+    pub channel: Option<&'static Channel>,
+}
+
+pub fn resolve(ch: &str, id: &str, side: &str) -> Option<Resolved> {
+    if ch == "device" {
+        let p = param("device", id)?;
+        return Some(Resolved { addr: 12, idx: p["idx"].as_u64()? as u8, param: p, channel: None });
+    }
+    let c = channel(ch)?;
+    if let Some(p) = param("eq", id) {
+        let addr = if side.eq_ignore_ascii_case("r") { c.eq_r } else { c.eq };
+        return Some(Resolved { addr, idx: p["idx"].as_u64()? as u8, param: p, channel: Some(c) });
+    }
+    let p = param(if c.output { "output" } else { "input" }, id)?;
+    Some(Resolved { addr: c.addr, idx: p["idx"].as_u64()? as u8, param: p, channel: Some(c) })
+}
+
+/// Display value of a protocol integer (dB, Hz, Q … as in the window).
+pub fn to_display(p: &Value, raw: i32) -> f64 {
+    if p["unit"] == "Hz" {
+        return raw as f64;
+    }
+    // rounded so that 7 × 0.1 prints as 0.7
+    (raw as f64 * p["scale"].as_f64().unwrap_or(1.0) * 1e4).round() / 1e4
+}
+
+/// Protocol integer of a display value, clamped to the parameter's range.
+pub fn from_display(p: &Value, v: f64) -> i32 {
+    let raw = if p["unit"] == "Hz" { v.round() as i32 } else { (v / p["scale"].as_f64().unwrap_or(1.0)).round() as i32 };
+    let (lo, hi) = raw_range(p);
+    raw.clamp(lo, hi)
+}
+
+/// "+1.5" / "-2" → relative, "on"/"off"/"toggle" for toggles, a name or index for selects.
+pub fn parse_value(p: &Value, model: &str, ch: Option<&Channel>, text: &str, current: Option<i32>) -> Result<i32, String> {
+    let t = text.trim();
+    let id = p["id"].as_str().unwrap_or("value");
+    match p["type"].as_str().unwrap_or("level") {
+        "toggle" => match t.to_ascii_lowercase().as_str() {
+            "1" | "on" | "true" => Ok(1),
+            "0" | "off" | "false" => Ok(0),
+            "toggle" => Ok(if current.unwrap_or(0) != 0 { 0 } else { 1 }),
+            _ => Err(format!("{}: on, off or toggle", id)),
+        },
+        "select" => {
+            let names = value_names(p, model, ch).unwrap_or_default();
+            if let Ok(i) = t.parse::<i32>() {
+                if names.is_empty() || (0..names.len() as i32).contains(&i) {
+                    return Ok(i);
+                }
+            }
+            if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(t)) {
+                return Ok(i as i32);
+            }
+            if t.eq_ignore_ascii_case("next") || t.eq_ignore_ascii_case("prev") {
+                let n = names.len().max(1) as i32;
+                let d = if t.eq_ignore_ascii_case("next") { 1 } else { -1 };
+                return Ok((current.unwrap_or(0) + d).rem_euclid(n));
+            }
+            Err(format!("{}: one of {}", id, names.join(", ")))
+        }
+        _ => {
+            // "+1" and "-=1" are relative; "-1" is the absolute value −1
+            let (rel, num) = if let Some(r) = t.strip_prefix("+=") {
+                (true, r.to_string())
+            } else if let Some(r) = t.strip_prefix("-=") {
+                (true, format!("-{r}"))
+            } else if let Some(r) = t.strip_prefix('+') {
+                (true, r.to_string())
+            } else {
+                (false, t.to_string())
+            };
+            let n: f64 = num.replace(',', ".").parse().map_err(|_| format!("{}: not a number", id))?;
+            if rel {
+                let cur = current.ok_or("value not known yet")?;
+                return Ok(from_display(p, to_display(p, cur) + n));
+            }
+            Ok(from_display(p, n))
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn values_from_the_command_line() {
+        let vol = resolve("line", "vol", "L").unwrap();
+        assert_eq!(vol.addr, 3);
+        assert_eq!(parse_value(vol.param, "pro", vol.channel, "-20.5", None), Ok(-205));
+        assert_eq!(parse_value(vol.param, "pro", vol.channel, "+2", Some(-205)), Ok(-185));
+        assert_eq!(parse_value(vol.param, "pro", vol.channel, "-=1", Some(-205)), Ok(-215));
+        assert!(parse_value(vol.param, "pro", vol.channel, "+2", None).is_err(), "relative needs the current value");
+        assert_eq!(parse_value(vol.param, "pro", vol.channel, "99", None), Ok(from_display(vol.param, 6.0)), "clamped to the range");
+        let mute = resolve("ph12", "mute", "L").unwrap();
+        assert_eq!(parse_value(mute.param, "pro", mute.channel, "toggle", Some(1)), Ok(0));
+        assert_eq!(parse_value(mute.param, "pro", mute.channel, "on", None), Ok(1));
+        assert_eq!(parse_value(mute.param, "pro", mute.channel, "maybe", None), Err("mute: on, off or toggle".into()));
+        let g = resolve("line", "b1g", "R").unwrap();
+        assert_eq!(g.addr, 5, "right EQ address");
+        assert_eq!(parse_value(g.param, "pro", g.channel, "2.5", None), Ok(5));
+        let ty = resolve("line", "b1type", "L").unwrap();
+        assert_eq!(parse_value(ty.param, "pro", ty.channel, "peak", None), Ok(0));
+        assert_eq!(parse_value(ty.param, "pro", ty.channel, "next", Some(3)), Ok(0), "wraps around");
+        assert!(resolve("line", "nothing", "L").is_none());
+        assert_eq!(resolve("device", "srate", "L").map(|r| r.addr), Some(12));
+    }
+}

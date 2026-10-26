@@ -1,4 +1,4 @@
-Remote control for RME ADI-2 series converters on Linux: ADI-2 DAC, ADI-2 Pro and ADI-2/4 Pro SE, including the FS and EX versions. Controls the unit over its USB-MIDI port through the ALSA sequencer, next to PipeWire or JACK. Not affiliated with RME.
+Remote control for RME ADI-2 series converters on Linux: ADI-2 DAC, ADI-2 Pro and ADI-2/4 Pro SE, including the FS and EX versions. Controls the unit over its USB-MIDI port through the ALSA sequencer, next to PipeWire or JACK, or through an [ADI-2-Pi](https://github.com/shells-dw/adi2-pi) on the network. Not affiliated with RME.
 
 **Pages**
 - Line In and all outputs: source, volume, Lock, Dim, Mute, balance, reference level, parametric EQ with curve, Bass/Treble, Dual EQ, width, crossfeed, filters, mono, polarity, M/S, loudness, DC protection, de-emphasis, loopback.

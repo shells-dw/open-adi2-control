@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.shells_dw.OpenAdi2Control</id>
+  <name>Open ADI-2 Control</name>
+  <summary>Remote for RME ADI-2 series converters</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.shells_dw">
+    <name>shells-dw</name>
+  </developer>
+  <description>
+    <p>
+      Controls RME ADI-2 DAC, ADI-2 Pro and ADI-2/4 Pro (all versions) over USB MIDI, or through
+      an ADI-2-Pi on the network: volume, inputs and outputs, parametric EQ, EQ presets, setups
+      and device settings.
+    </p>
+    <ul>
+      <li>Volume keys, tray icon and volume popup</li>
+      <li>EQ preset editor with A/B comparison, import and export of ADI-2 Remote preset files</li>
+      <li>Headphone EQ from AutoEq measurements</li>
+      <li>Command line and D-Bus control</li>
+    </ul>
+    <p>Not affiliated with RME.</p>
+  </description>
+  <launchable type="desktop-id">io.github.shells_dw.OpenAdi2Control.desktop</launchable>
+  <url type="homepage">https://github.com/shells-dw/open-adi2-control</url>
+  <url type="bugtracker">https://github.com/shells-dw/open-adi2-control/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/shells-dw/open-adi2-control/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <releases>
+    <release version="0.2.0" date="2026-10-26"/>
+  </releases>
+</component>
