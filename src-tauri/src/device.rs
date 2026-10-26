@@ -72,10 +72,14 @@ enum Timer {
     Resync,
     Watch,
     Presets,
+    /// read EQ preset n
+    PresetReq(u8),
+    /// a message that must go out (preset store flags word, read-back of one preset)
     Send(Vec<u8>),
 }
 
 impl Timer {
+    /// one of its kind in the list at a time
     fn single(&self) -> bool {
         !matches!(self, Timer::Send(_))
     }
@@ -100,6 +104,9 @@ pub struct Engine {
 
     state: HashMap<String, i32>,
     pending: BTreeMap<String, i32>,
+    /// when each key was last sent: a dump requested before that may still arrive with the old
+    /// value and is ignored for the key until the read-back
+    sent_at: HashMap<String, Instant>,
     setups: Vec<String>,
     presets: Vec<Preset>,
     preset_cursor: Option<u8>,
@@ -159,6 +166,7 @@ impl Engine {
             last_reprobe: Instant::now(),
             state: HashMap::new(),
             pending: BTreeMap::new(),
+            sent_at: HashMap::new(),
             setups: vec![String::new(); 9],
             presets: empty_presets(),
             preset_cursor: None,
@@ -214,6 +222,11 @@ impl Engine {
                     self.request_presets();
                     self.at(PRESETS_EVERY, Timer::Presets);
                 }
+                Timer::PresetReq(n) => {
+                    if let Some(id) = self.id {
+                        self.tx(&p::request_eq_preset(id, n));
+                    }
+                }
                 Timer::Send(buf) => {
                     if self.id.is_some() {
                         self.tx(&buf);
@@ -238,6 +251,7 @@ impl Engine {
             model: self.id.map(|i| p::model_of(i).to_string()),
             port: self.port.clone(),
             problem: if self.connected && self.answering { None } else { self.problem.clone() },
+            read_only: false,
         }
     }
 
@@ -316,6 +330,7 @@ impl Engine {
         self.answering = false;
         self.state.clear();
         self.pending.clear();
+        self.sent_at.clear();
         self.setups = vec![String::new(); 9];
         self.presets = empty_presets();
         self.preset_cursor = None;
@@ -330,7 +345,7 @@ impl Engine {
             return;
         }
         if self.probe_list.is_empty() {
-            // nobody answered: MIDI Control is probably off. Keep trying slowly.
+            // no answer on any ID: keep trying every PROBE_RETRY
             self.problem = Some(Problem::new(
                 "silent",
                 format!(
@@ -402,9 +417,15 @@ impl Engine {
     }
 
     fn request_presets(&mut self) {
-        let Some(id) = self.id else { return };
+        self.request_presets_after(Duration::ZERO);
+    }
+
+    fn request_presets_after(&mut self, delay: Duration) {
+        if self.id.is_none() {
+            return;
+        }
         for n in 1..=20u8 {
-            self.at(PRESET_GAP * (n as u32 - 1), Timer::Send(p::request_eq_preset(id, n)));
+            self.at(delay + PRESET_GAP * (n as u32 - 1), Timer::PresetReq(n));
         }
     }
 
@@ -429,8 +450,10 @@ impl Engine {
             self.answering = true;
             self.problem = None;
             self.emit_device();
-            // anything may have changed meanwhile
-            self.refresh();
+            // anything may have changed meanwhile; the last reprobe already asked for the dump
+            if self.last_reprobe.elapsed() > Duration::from_secs(2) {
+                self.refresh();
+            }
             self.request_presets();
         }
         match m.msg {
@@ -504,8 +527,8 @@ impl Engine {
                 continue;
             }
             let k = key(q.addr, q.idx);
-            if self.pending.contains_key(&k) {
-                continue; // our own newer value wins until it's sent
+            if self.pending.contains_key(&k) || self.sent_at.get(&k).is_some_and(|t| t.elapsed() < READBACK) {
+                continue; // the app's own value wins until the read-back after it
             }
             if self.state.get(&k) != Some(&q.value) {
                 self.state.insert(k.clone(), q.value);
@@ -670,13 +693,8 @@ impl Engine {
 
     fn after_setup_change(&mut self, delay: Duration) {
         self.at(delay, Timer::Readback);
-        // presets right after the dump
-        self.timers.retain(|(_, t)| !matches!(t, Timer::Send(_)));
-        if let Some(id) = self.id {
-            for n in 1..=20u8 {
-                self.at(delay + Duration::from_millis(400) + PRESET_GAP * (n as u32 - 1), Timer::Send(p::request_eq_preset(id, n)));
-            }
-        }
+        // the presets after the dump
+        self.request_presets_after(delay + Duration::from_millis(400));
     }
 
     fn setup_name(&mut self, id: u8, n: u8, name: &str) {
@@ -700,7 +718,7 @@ impl Engine {
             self.tx(&p::name_eq_preset(id, n, name));
         }
         self.at(Duration::from_millis(30), Timer::Send(flags));
-        self.at(Duration::from_millis(430), Timer::Send(p::request_eq_preset(id, n)));
+        self.at(Duration::from_millis(430), Timer::PresetReq(n));
     }
 
     fn flush(&mut self) {
@@ -709,9 +727,14 @@ impl Engine {
         if self.pending.is_empty() {
             return;
         }
+        let now = Instant::now();
+        self.sent_at.retain(|_, t| now.duration_since(*t) < READBACK);
         let params: Vec<Param> = std::mem::take(&mut self.pending)
             .into_iter()
-            .filter_map(|(k, value)| split_key(&k).map(|(addr, idx)| Param { addr, idx, value }))
+            .filter_map(|(k, value)| {
+                self.sent_at.insert(k.clone(), now);
+                split_key(&k).map(|(addr, idx)| Param { addr, idx, value })
+            })
             .collect();
         for m in p::params_to_device(id, &params) {
             self.tx(&m);

@@ -1,6 +1,6 @@
 //! What the app knows about the unit, shared by the USB engine, the ADI-2-Pi client and the UI.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -29,9 +29,12 @@ pub struct DeviceInfo {
     /// port or bridge the unit is reached through
     pub port: Option<String>,
     pub problem: Option<Problem>,
+    /// ADI-2-Pi with "key needed for changes only" and no key: values can be seen, not changed
+    pub read_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
 pub struct Preset {
     pub n: u8,
     pub name: String,

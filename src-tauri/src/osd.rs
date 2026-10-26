@@ -82,6 +82,22 @@ fn kde(info: &Info) -> bool {
         .is_ok()
 }
 
+/// A regular desktop notification (stays in the notification list).
+pub fn notify_text(summary: &str, body: &str) -> bool {
+    let Some(c) = bus() else { return false };
+    let mut hints: HashMap<&str, Value> = HashMap::new();
+    hints.insert("desktop-entry", Value::from("open-adi2-control"));
+    let actions: Vec<&str> = vec![];
+    c.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &("Open ADI-2 Control", 0u32, "open-adi2-control", summary, body, actions, hints, -1i32),
+    )
+    .is_ok()
+}
+
 fn notify(info: &Info) -> bool {
     let Some(c) = bus() else { return false };
     let mut hints: HashMap<&str, Value> = HashMap::new();

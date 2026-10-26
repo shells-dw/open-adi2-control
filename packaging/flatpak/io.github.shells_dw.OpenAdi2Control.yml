@@ -1,0 +1,55 @@
+# Flatpak of the released .deb (the binary is built by the release workflow on Ubuntu 22.04).
+# Needs a GNOME runtime that contains WebKitGTK 4.1 (libwebkit2gtk-4.1.so.0).
+# Update the version and the sha256 sums for each release (SHA256SUMS-*.txt on the release).
+id: io.github.shells_dw.OpenAdi2Control
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: open-adi2-control
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # USB MIDI through the ALSA sequencer (/dev/snd/seq)
+  - --device=all
+  # ADI-2-Pi on the network, mDNS discovery, update check
+  - --share=network
+  # tray icon, volume popup, notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.kde.osdService
+  - --talk-name=org.freedesktop.Notifications
+  # re-read after resume and screen unlock
+  - --system-talk-name=org.freedesktop.login1
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --talk-name=org.gnome.ScreenSaver
+modules:
+  - name: open-adi2-control
+    buildsystem: simple
+    sources:
+      - type: file
+        only-arches: [x86_64]
+        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.2.0/open-adi2-control_0.2.0_amd64.deb
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000
+        dest-filename: package.deb
+      - type: file
+        only-arches: [aarch64]
+        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.2.0/open-adi2-control_0.2.0_arm64.deb
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000
+        dest-filename: package.deb
+      - type: file
+        path: ../linux/io.github.shells_dw.OpenAdi2Control.metainfo.xml
+      - type: file
+        path: ../linux/io.github.shells_dw.OpenAdi2Control.desktop
+    build-commands:
+      - ar -x package.deb
+      - tar -xf data.tar.*
+      - install -Dm755 usr/bin/open-adi2-control /app/bin/open-adi2-control
+      # resources: Tauri looks in ../lib/<name> next to the binary
+      - mkdir -p /app/lib && cp -r usr/lib/open-adi2-control /app/lib/
+      - install -Dm644 io.github.shells_dw.OpenAdi2Control.desktop /app/share/applications/io.github.shells_dw.OpenAdi2Control.desktop
+      - sed -i 's/^Icon=.*/Icon=io.github.shells_dw.OpenAdi2Control/' /app/share/applications/io.github.shells_dw.OpenAdi2Control.desktop
+      - install -Dm644 usr/share/icons/hicolor/32x32/apps/open-adi2-control.png /app/share/icons/hicolor/32x32/apps/io.github.shells_dw.OpenAdi2Control.png
+      - install -Dm644 usr/share/icons/hicolor/128x128/apps/open-adi2-control.png /app/share/icons/hicolor/128x128/apps/io.github.shells_dw.OpenAdi2Control.png
+      - install -Dm644 usr/share/icons/hicolor/256x256@2/apps/open-adi2-control.png /app/share/icons/hicolor/256x256/apps/io.github.shells_dw.OpenAdi2Control.png
+      - install -Dm644 io.github.shells_dw.OpenAdi2Control.metainfo.xml /app/share/metainfo/io.github.shells_dw.OpenAdi2Control.metainfo.xml

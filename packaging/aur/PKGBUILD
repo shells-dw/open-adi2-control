@@ -1,0 +1,51 @@
+# Maintainer: shells-dw <shells-dw@users.noreply.github.com>
+# Builds Open ADI-2 Control from the release tag.
+pkgname=open-adi2-control
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='Remote for RME ADI-2 series converters (USB MIDI or ADI-2-Pi)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/shells-dw/open-adi2-control'
+license=('GPL-3.0-or-later')
+depends=('webkit2gtk-4.1' 'gtk3' 'alsa-lib' 'libayatana-appindicator' 'hicolor-icon-theme')
+optdepends=('wireplumber: system volume for the volume keys while the ADI-2 is not controlled (wpctl)'
+            'libpulse: same, with pactl'
+            'xdg-utils: opening links')
+makedepends=('cargo' 'nodejs' 'npm')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  npm ci
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --manifest-path src-tauri/Cargo.toml --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  npx tauri build --no-bundle
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release --manifest-path src-tauri/Cargo.toml
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 src-tauri/target/release/open-adi2-control "$pkgdir/usr/bin/open-adi2-control"
+  # resources: Tauri looks in ../lib/<name> next to the binary
+  install -d "$pkgdir/usr/lib/open-adi2-control"
+  cp -r --no-preserve=ownership eq-data "$pkgdir/usr/lib/open-adi2-control/"
+  install -Dm644 packaging/linux/io.github.shells_dw.OpenAdi2Control.desktop "$pkgdir/usr/share/applications/open-adi2-control.desktop"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/open-adi2-control.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/open-adi2-control.png"
+  install -Dm644 src-tauri/icons/256x256.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/open-adi2-control.png"
+  install -Dm644 src-tauri/icons/512x512.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/open-adi2-control.png"
+  install -Dm644 packaging/linux/io.github.shells_dw.OpenAdi2Control.metainfo.xml "$pkgdir/usr/share/metainfo/io.github.shells_dw.OpenAdi2Control.metainfo.xml"
+  install -Dm644 NOTICE.md "$pkgdir/usr/share/licenses/$pkgname/NOTICE.md"
+}

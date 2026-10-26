@@ -10,12 +10,16 @@
   <header class="top">
     <nav class="tabs" id="tabs" role="tablist"></nav>
     <div class="spacer"></div>
+    <button class="badge" id="viewOnly" hidden title="This ADI-2-Pi shows its state without a key; click to enter the key for changes">View only</button>
+    <select class="units" id="units" hidden aria-label="Saved connection"></select>
     <div class="conn" id="conn"><span class="dot"></span><span id="connText">Starting…</span></div>
   </header>
   <div class="banner" id="banner" hidden></div>
+  <div class="updbar" id="updBar" hidden></div>
   <main id="main"></main>
   <dialog id="dlg"></dialog>
   <script src="eq.js"></script>
+  <script src="hp.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

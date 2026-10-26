@@ -43,16 +43,30 @@
     lastOut: 'line',
     page: 'line',
     version: '',
+    update: null, // update check: { checking, checkedAt, latest, newer, offer, error, install, appimage }
+    updDismissed: null, // version whose bar was closed in this session
     editor: null, // EQ preset editor: { n, name, dual, L, R }
     clip: null,
     side: {}, // per channel: 'L' | 'R' being edited
+    ab: null, // A/B compare after Listen: { ch, before: [[key, value]], after: [[key, value]], on: 'A' | 'B' }
+    hp: null, // headphone EQ tab state (hp.js)
   };
   const SEC = {};
   let CH = {};
+  const DEBUG = false;
 
   const key = (a, i) => `${a}.${i}`;
-  const model = () => S.device.model || (S.config && S.config.connection.mode === 'demo' ? S.config.connection.demo_model : 'pro');
-  const usable = () => !!(S.device.connected && S.device.answering && S.device.ready);
+  const unit = () => (S.config && (S.config.units[S.config.active] || S.config.units[0])) || { mode: 'usb' };
+  const model = () => S.device.model || (unit().mode === 'demo' ? unit().demo_model : 'pro');
+  /** The unit is connected and read out. */
+  const online = () => !!(S.device.connected && S.device.answering && S.device.ready);
+  /** …and takes changes (an ADI-2-Pi without its key shows but doesn't take). */
+  const usable = () => online() && !S.device.read_only;
+  /** Before a change: in view-only mode ask for the key instead. */
+  function guard() {
+    if (online() && S.device.read_only) { askKey(); return false; }
+    return usable();
+  }
   const has = (k) => S.p.has(k);
   const get = (k) => S.p.get(k);
   const avail = (x) => !((x.only && !x.only.includes(model())) || (x.not && x.not.includes(model())));
@@ -109,7 +123,10 @@
   const pendingSets = new Map();
   let setFrame = 0;
   function setRaw(k, v) {
-    if (!usable()) return;
+    if (!usable()) {
+      if (online() && S.device.read_only) { notify([k]); askKey(); }
+      return;
+    }
     S.p.set(k, v);
     notify([k]);
     pendingSets.set(k, v);
@@ -192,7 +209,8 @@
 
   /**
    * Knob in display units.
-   * o: { label, color, min, max, step, log, fmt(v), get(), set(v), size, wheel ('all'|'volume'), volume, def, unitText }
+   * o: { label, color, min, max, step, log, fmt(v), get(), set(v), disabled(), size, range (px per full
+   * turn), unipolar (arc from the minimum, not from 0), volume (wheel setting "volume only" applies), def (double-click) }
    */
   function knob(o) {
     const size = o.size || 44;
@@ -330,6 +348,32 @@
       ]);
     });
   }
+  /** View-only ADI-2-Pi: the key that allows changes. */
+  function askKey() {
+    const d0 = $('#dlg');
+    if (d0.open) return;
+    const u = unit();
+    const inp = h('input', { type: 'password', placeholder: 'Access key', autocomplete: 'off', style: { width: '100%' }, 'aria-label': 'Access key' });
+    const d = dialog(`Access key for ${u.name || u.pi_address || 'the ADI-2-Pi'}`, h('div', { style: { maxWidth: '400px' } },
+      h('p', { class: 'hint', style: { margin: '0 0 8px' } }, 'This ADI-2-Pi shows its state to everyone but takes changes only with its access key (set on its System tab).'),
+      inp), [
+      h('button', { class: 'btn', onclick: () => d.close() }, 'Keep viewing'),
+      h('button', { class: 'btn primary', onclick: () => { d.close(); saveUnit({ pi_key: inp.value.trim() }); } }, 'Connect'),
+    ]);
+    // (preventDefault: otherwise the same Enter reaches the element focused after close)
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); d.close(); saveUnit({ pi_key: inp.value.trim() }); } });
+    setTimeout(() => inp.focus(), 30);
+  }
+
+  /** Load a setup after confirmation (window buttons, tray, shortcuts). */
+  async function confirmSetup(n) {
+    if (!guard()) return;
+    const name = S.setups[n - 1] || '';
+    const ok = await confirmDlg(`Load setup ${n}?`, `${name ? `"${name}"` : `Setup ${n}`} replaces the unit's current settings, volume included. EQ presets are not affected.`, 'Load');
+    if (!ok) return;
+    invoke('setup', { action: 'load', n }).then(() => toast(`Loading setup ${n}`)).catch((e) => toast(e, true));
+  }
+
   function askName(title, value, okText = 'Save') {
     return new Promise((resolve) => {
       const inp = h('input', { type: 'text', value: value || '', maxlength: 14, style: { width: '100%' } });
@@ -337,7 +381,7 @@
         h('button', { class: 'btn', onclick: () => { d.close(); resolve(null); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: () => { d.close(); resolve(inp.value.trim()); } }, okText),
       ]);
-      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { d.close(); resolve(inp.value.trim()); } });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); d.close(); resolve(inp.value.trim()); } });
       setTimeout(() => inp.focus(), 30);
     });
   }
@@ -407,13 +451,13 @@
     g.lineWidth = 1;
     for (const f of [20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000]) {
       const major = [100, 1000, 10000].includes(f);
-      g.strokeStyle = major ? '#2f353c' : '#1c2025';
+      g.strokeStyle = major ? cssColor('var(--grid-major)') : cssColor('var(--grid)');
       g.beginPath(); g.moveTo(Math.round(x(f)) + 0.5, 0); g.lineTo(Math.round(x(f)) + 0.5, H); g.stroke();
     }
-    g.fillStyle = '#6a717a';
+    g.fillStyle = cssColor('var(--faint)');
     for (const [f, t] of [[20, '20'], [100, '100'], [1000, '1k'], [10000, '10k']]) g.fillText(t, x(f) + 3, H - 4);
     for (const db of [-12, -6, 0, 6, 12]) {
-      g.strokeStyle = db === 0 ? '#39404a' : '#1c2025';
+      g.strokeStyle = db === 0 ? cssColor('var(--grid-zero)') : cssColor('var(--grid)');
       g.beginPath(); g.moveTo(0, Math.round(y(db)) + 0.5); g.lineTo(W, Math.round(y(db)) + 0.5); g.stroke();
       g.fillText(db > 0 ? `+${db}` : String(db), 4, y(db) - 3);
     }
@@ -428,7 +472,7 @@
         if (px === 0) g.moveTo(px, y(db)); else g.lineTo(px, y(db));
       }
       g.lineWidth = 2.2;
-      g.strokeStyle = sd === 'R' ? '#6fa0ff' : cssColor('var(--accent)');
+      g.strokeStyle = sd === 'R' ? cssColor('var(--curve-r)') : cssColor('var(--accent)');
       g.setLineDash(sd === 'R' && sides.length > 1 ? [6, 4] : []);
       g.globalAlpha = sides.length > 1 && sd !== side ? 0.5 : 1;
       g.stroke();
@@ -447,7 +491,7 @@
       pts.push({ b, px, py });
       g.beginPath();
       g.arc(px, py, 6, 0, Math.PI * 2);
-      g.fillStyle = '#0c0e10';
+      g.fillStyle = cssColor('var(--curve)');
       g.fill();
       g.lineWidth = 2;
       g.strokeStyle = cssColor(BAND_COLORS[b.band]);
@@ -519,6 +563,7 @@
     const cv = h('canvas', { class: 'curve' });
     const redraw = () => requestAnimationFrame(() => drawCurve(cv, src, sideOf()));
     attachCurveDrag(cv, src, sideOf, redraw);
+    cv.addEventListener('themechange', redraw);
     new ResizeObserver(redraw).observe(cv);
 
     const P = (id) => SEC.eq[id];
@@ -550,7 +595,11 @@
       bandKnobs(EQ.TREBLE, 'Treble', BAND_COLORS.T, 'bt'),
     ];
     const bands = h('div', { class: 'bands' }, cols);
+    // the unit reports Bass/Treble for this channel (an ADI-2 Pro EX sends none for the input)
+    const hasBT = () => !src.live || !S.device.ready || has(key(c.eq, 20));
     const updateAll = () => {
+      bands.classList.toggle('no-bt', !hasBT());
+      btRow.hidden = !hasBT();
       for (const col of cols) {
         col.querySelectorAll('.knob-box').forEach((k) => k.update && k.update());
         if (col.isBT) col.classList.toggle('off', !src.bt());
@@ -576,10 +625,12 @@
     const dualSw = src.live
       ? swKey(src.dualKey, 'Dual EQ')
       : sw(src.dual(), () => { S.editor.dual = !S.editor.dual; if (S.editor.dual) for (let i = 3; i <= 19; i++) S.editor.R[i] ??= S.editor.L[i]; dualSw.setAttribute('aria-checked', S.editor.dual ? 'true' : 'false'); opts.onChange && opts.onChange(); updateAll(); }, 'Dual EQ');
+    const btRow = h('div', { class: 'eq-bt' },
+      src.live ? swField('Bass / Treble', swKey(key(c.eq, 20), 'Bass / Treble')) : null,
+      src.live && (has(key(c.eq, 27)) || !S.device.ready) ? swField('B/T load with EQ preset', swKey(key(c.eq, 27), 'Load with EQ')) : null);
     const side = h('div', { class: 'eq-side' },
       h('div', { class: 'inline' }, swField('Dual', dualSw), seg),
-      src.live ? swField('Bass / Treble', swKey(key(c.eq, 20), 'Bass / Treble')) : null,
-      src.live && has(key(c.eq, 27)) || (src.live && !S.device.ready) ? swField('B/T load with EQ preset', swKey(key(c.eq, 27), 'Load with EQ')) : null,
+      btRow,
       field('Band 1', t1),
       field('Band 5', t5));
     const updateSel = () => { t1.update(); t5.update(); };
@@ -627,6 +678,7 @@
 
   /** Store the live EQ of an output into one of the unit's 20 presets. */
   function storeLive(src) {
+    if (!guard()) return;
     const c = src.c;
     const slot = h('select', null, S.presets.map((p) => h('option', { value: p.n, text: `${p.n} · ${p.name || (p.empty ? '(empty)' : `Preset ${p.n}`)}` })));
     const cur = get(key(c.eq, 28));
@@ -656,7 +708,7 @@
     const vk = K('vol');
 
     // volume
-    const limitDb = () => { const l = S.config.volume.limit[c.key]; return l === null || l === undefined ? null : l; };
+    const limitDb = () => { const pr = S.config.volume.profiles[S.config.volume.profile] || {}; const l = (pr.limit || {})[c.key]; return l === null || l === undefined ? null : l; };
     // about 0.15 dB per pixel (Shift: finer), so a drag can't jump the volume up
     const big = knobKey(vk, volP, { label: '', size: 128, volume: true, unit: '', range: 800, unipolar: true });
     big.querySelector('.knob-v').remove();
@@ -800,13 +852,15 @@
         return h('div', { class: 'setup' },
           h('span', { class: 'n' }, n),
           h('span', { class: 'name', title: name }, name || `Setup ${n}`),
-          h('button', { class: 'btn', onclick: () => invoke('setup', { action: 'load', n }).then(() => toast(`Loading setup ${n}`)).catch((e) => toast(e, true)) }, 'Load'),
+          h('button', { class: 'btn', onclick: () => confirmSetup(n) }, 'Load'),
           h('button', { class: 'btn', onclick: async () => {
+            if (!guard()) return;
             const nm = await askName(`Save the current state as setup ${n}`, name, 'Save');
             if (nm === null) return;
             invoke('setup', { action: 'save', n, name: nm || null }).then(() => toast(`Saved as setup ${n}`)).catch((e) => toast(e, true));
           } }, 'Save'),
           h('button', { class: 'btn', title: 'Rename', onclick: async () => {
+            if (!guard()) return;
             const nm = await askName(`Rename setup ${n}`, name, 'Rename');
             if (!nm) return;
             invoke('setup', { action: 'rename', n, name: nm }).catch((e) => toast(e, true));
@@ -816,6 +870,7 @@
     draw();
     pageSubs.add(draw);
     const factory = h('button', { class: 'btn', onclick: async () => {
+      if (!guard()) return;
       if (!(await confirmDlg('Load factory settings?', 'This changes most settings of the unit to RME\'s defaults. EQ presets stay as they are. Save the current state as a setup first if you want to keep it.', 'Load factory settings'))) return;
       invoke('setup', { action: 'factory', n: 0 }).then(() => toast('Factory settings loaded')).catch((e) => toast(e, true));
     } }, 'Load factory settings…');
@@ -857,21 +912,49 @@
       }));
     };
     const nameIn = h('input', { type: 'text', maxlength: 14, placeholder: 'Name', style: { width: '150px' }, oninput: () => { S.editor.name = nameIn.value; drawGrid(); } });
-    const target = h('select', { 'aria-label': 'Listen on' }, outputs().filter((c) => shows(key(c.addr, 12), SEC.output.vol, c)).map((c) => h('option', { value: c.key, text: chName(c) })));
+    const target = h('select', { 'aria-label': 'Listen on', onchange: () => { S.ab = null; drawAb(); } }, outputs().filter((c) => shows(key(c.addr, 12), SEC.output.vol, c)).map((c) => h('option', { value: c.key, text: chName(c) })));
     target.value = S.lastOut && CH[S.lastOut] ? S.lastOut : 'line';
-    const listenBtn = h('button', { class: 'btn', title: 'Send this EQ to the chosen output (its Manual EQ); nothing is stored', onclick: () => {
-      const c = CH[target.value];
-      if (!c || !usable()) return;
+    const editorItems = (c) => {
       const items = [];
       for (let i = 3; i <= 19; i++) { items.push([key(c.eq, i), S.editor.L[i]]); if (S.editor.dual) items.push([key(c.eqR, i), S.editor.R[i]]); }
       for (let i = 21; i <= 26; i++) items.push([key(c.eq, i), S.editor.L[i]]);
       items.push([key(c.addr, SEC.output.dualeq.idx), S.editor.dual ? 1 : 0], [key(c.eq, 2), 1]);
+      return items;
+    };
+    const sendItems = (items) => {
       for (const [k, v] of items) S.p.set(k, v);
-      invoke('set', { items }).then(() => toast(`Listening on ${chName(c)}`)).catch((e) => toast(e, true));
+      return invoke('set', { items });
+    };
+    const listenBtn = h('button', { class: 'btn', title: 'Send this EQ to the chosen output (its Manual EQ); nothing is stored. A/B then switches between the output\'s previous EQ and this one.', onclick: () => {
+      const c = CH[target.value];
+      if (!c || !guard()) return;
+      const after = editorItems(c);
+      // what the output had, for A/B
+      if (!S.ab || S.ab.ch !== c.key) {
+        const before = [];
+        for (const [k] of after) if (has(k)) before.push([k, get(k)]);
+        S.ab = { ch: c.key, before, after, on: 'B' };
+      } else {
+        S.ab.after = after;
+        S.ab.on = 'B';
+      }
+      sendItems(after).then(() => { toast(`Listening on ${chName(c)}`); drawAb(); }).catch((e) => toast(e, true));
     } }, 'Listen');
+    const abBox = h('div', { class: 'seg', title: 'A: the EQ the output had before Listen · B: this preset' },
+      ['A', 'B'].map((which) => h('button', { value: which, onclick: () => {
+        if (!S.ab || S.ab.ch !== target.value || !guard()) return;
+        const items = which === 'A' ? S.ab.before : S.ab.after;
+        S.ab.on = which;
+        sendItems(items).then(drawAb).catch((e) => toast(e, true));
+      } }, which)));
+    const drawAb = () => {
+      const active = S.ab && S.ab.ch === target.value;
+      abBox.querySelectorAll('button').forEach((b) => { b.disabled = !active; b.setAttribute('aria-pressed', active && S.ab.on === b.value ? 'true' : 'false'); });
+    };
+    drawAb();
     const actions = [
       nameIn,
-      h('span', { class: 'lab' }, 'on'), target, listenBtn,
+      h('span', { class: 'lab' }, 'on'), target, listenBtn, abBox,
       h('button', { class: 'btn', title: 'Copy this EQ', onclick: () => { S.clip = JSON.parse(JSON.stringify(S.editor)); toast(`Copied preset ${S.editor.n}`); } }, 'Copy'),
       h('button', { class: 'btn', title: 'Paste the copied EQ (name included) here', onclick: () => {
         if (!S.clip) { toast('Copy a preset first'); return; }
@@ -887,6 +970,7 @@
       } }, 'Clear'),
       h('button', { class: 'btn', title: 'Back to what the unit has stored', onclick: () => { presetToEditor(S.editor.n); drawAll(); } }, 'Re-load'),
       h('button', { class: 'btn primary needs-unit', onclick: () => {
+        if (!guard()) return;
         const e = S.editor;
         const L = { ...e.L }, R = e.dual ? { ...e.R } : {};
         invoke('store_preset', { n: e.n, name: e.name.trim() || null, l: L, r: R, dual: e.dual })
@@ -903,16 +987,88 @@
     }
     pageSubs.add(() => { drawGrid(); });
     drawAll();
+    const importBtn = h('button', { class: 'btn', title: 'Presets from an ADI-2 Remote file (.adieqpr)', onclick: () => importPresets(() => { drawAll(); }) }, 'Import…');
+    const exportBtn = h('button', { class: 'btn needs-unit', title: 'All stored presets as an ADI-2 Remote file (.adieqpr)', onclick: exportPresets }, 'Export…');
     return h('div', { class: 'page' },
       h('section', { class: 'panel' }, h('div', { class: 'ph' }, h('h2', null, 'EQ presets on the unit'), h('div', { class: 'grow' }),
-        h('span', { class: 'hint', style: { margin: 0 } }, 'Pick one to edit it below. Changes stay here until you press Store.')), grid),
+        h('span', { class: 'hint', style: { margin: 0 } }, 'Pick one to edit it below. Changes stay here until you press Store.'), importBtn, exportBtn), grid),
       panel);
+  }
+
+  // ---- preset files (.adieqpr, ADI-2 Remote's format)
+  function exportPresets() {
+    invoke('export_presets', { slots: null })
+      .then((text) => invoke('save_file', { title: 'Export EQ presets', name: 'adi2-eq-presets.adieqpr', ext: ['adieqpr'], label: 'ADI-2 EQ presets', text }))
+      .then((path) => { if (path) toast(`Saved ${path}`); })
+      .catch((e) => toast(e, true));
+  }
+
+  /**
+   * Pick a file, show its presets, store the chosen ones or open one in the editor.
+   * `presets` given: skip the file dialog (the headphone EQ tab hands over a result).
+   */
+  async function importPresets(onEditor, presets, sourceName) {
+    const fromFile = !presets;
+    try {
+      if (!presets) {
+        const picked = await invoke('pick_file', { title: 'Import EQ presets', ext: ['adieqpr', 'xml'], label: 'ADI-2 EQ presets' });
+        if (!picked) return;
+        sourceName = picked[0];
+        presets = await invoke('parse_presets', { text: picked[1] });
+      }
+    } catch (e) { toast(e, true); return; }
+    const slotOpts = () => S.presets.map((p) => h('option', { value: p.n, text: `${p.n} · ${p.name || (p.empty ? '(empty)' : `Preset ${p.n}`)}` }));
+    const rows = presets.map((p) => {
+      const cb = h('input', { type: 'checkbox', checked: true, 'aria-label': `Import ${p.name || `preset ${p.n}`}` });
+      const slot = h('select', { 'aria-label': 'Store in slot' }, slotOpts());
+      slot.value = String(Math.min(20, Math.max(1, p.n)));
+      const edit = h('button', { class: 'btn', title: 'Open in the editor without storing', onclick: () => {
+        d.close();
+        const n = Number(slot.value);
+        const def = S.schema.eqDefaults.values;
+        const L = {}, R = {};
+        for (let i = 3; i <= 26; i++) if (i !== 20) L[i] = p.L[i] !== undefined ? p.L[i] : def[i];
+        for (let i = 3; i <= 19; i++) R[i] = p.dual && p.R[i] !== undefined ? p.R[i] : L[i];
+        S.editor = { n, name: p.name || '', dual: !!p.dual, L, R, base: null };
+        if (S.page !== 'presets') go('presets'); else onEditor && onEditor();
+      } }, 'Edit');
+      return { p, cb, slot, row: h('tr', null, h('td', null, cb), h('td', null, p.name || h('i', { class: 'hint' }, 'no name'), fromFile ? h('small', { class: 'hint', style: { display: 'block', margin: 0 } }, `slot ${p.n} in the file${p.dual ? ' · dual' : ''}`) : null), h('td', null, slot), h('td', null, edit)) };
+    });
+    const d = dialog(fromFile ? `Import ${sourceName ? `from ${sourceName}` : 'EQ presets'}` : `Store ${sourceName ? `the EQ for ${sourceName}` : 'EQ'} as a preset`, h('div', { style: { maxWidth: '560px' } },
+      h('table', { class: 'tbl' }, h('tr', null, h('td'), h('td', null, 'Preset'), h('td', null, 'Store in slot'), h('td')), rows.map((r) => r.row)),
+      h('p', { class: 'hint' }, 'Storing replaces what the chosen slot holds on the unit.')), [
+      h('button', { class: 'btn', onclick: () => d.close() }, 'Cancel'),
+      h('button', { class: 'btn primary needs-unit', onclick: async () => {
+        if (!guard()) return;
+        const todo = rows.filter((r) => r.cb.checked);
+        if (!todo.length) { toast('Nothing selected'); return; }
+        d.close();
+        let done = 0;
+        for (const r of todo) {
+          const p = r.p;
+          try {
+            await invoke('store_preset', { n: Number(r.slot.value), name: p.name || null, l: p.L, r: p.dual ? p.R : {}, dual: !!p.dual });
+            done++;
+          } catch (e) { toast(e, true); break; }
+        }
+        if (done) toast(`Stored ${done} preset${done === 1 ? '' : 's'}`);
+      } }, fromFile ? 'Store selected' : 'Store'),
+    ]);
   }
 
   // ---- settings
   function saveConfig(patch) {
-    return invoke('set_config', { patch }).then((c) => { S.config = c; for (const fn of pageSubs) fn(); return c; }).catch((e) => { toast(e, true); });
+    return invoke('set_config', { patch }).then((c) => { S.config = c; applyTheme(); for (const fn of pageSubs) fn(); return c; }).catch((e) => { toast(e, true); });
   }
+  /** Change the active saved connection (or `idx`). */
+  function saveUnit(patch, idx = S.config.active) {
+    const units = S.config.units.map((u, i) => (i === idx ? { ...u, ...patch } : u));
+    return saveConfig({ units, active: idx });
+  }
+  function saveProfiles(profiles, profile = S.config.volume.profile) {
+    return saveConfig({ volume: { profiles, profile } });
+  }
+  const NEW_UNIT = { name: '', mode: 'usb', pi_address: '', pi_key: '', demo_model: 'pro' };
 
   function opt(label, small, ctl) {
     return h('div', { class: 'opt' }, h('div', { class: 'lab' }, label, small ? h('small', null, small) : null), ctl);
@@ -925,6 +1081,7 @@
       path.split('.').reduce((o, k, i, a) => (o[k] = i === a.length - 1 ? v : {}), patch);
       saveConfig(patch).then(() => b.setAttribute('aria-checked', get2() ? 'true' : 'false'));
     }, label);
+    pageSubs.add(() => b.setAttribute('aria-checked', get2() ? 'true' : 'false'));
     return b;
   }
   function cfgSelect(path, choices, label) {
@@ -936,29 +1093,44 @@
       saveConfig(patch);
     } }, choices.map(([v, t]) => h('option', { value: v, text: t })));
     sel.value = String(get2());
+    pageSubs.add(() => { sel.value = String(get2()); });
     return sel;
   }
 
   function pageSettings() {
     const cfg = S.config;
-    // connection
-    const mode = cfg.connection.mode;
-    const addr = h('input', { type: 'text', placeholder: 'adi2-pi.local or 192.168.1.20', value: cfg.connection.pi_address, style: { width: '240px' } });
-    const keyIn = h('input', { type: 'password', placeholder: 'only if set on the ADI-2-Pi', value: cfg.connection.pi_key || '', autocomplete: 'off', style: { width: '240px' }, 'aria-label': 'Access key' });
+    // connection: the active saved unit
+    const u = unit();
+    const mode = u.mode;
+    const unitSel = h('select', { 'aria-label': 'Saved connection', onchange: () => saveConfig({ active: Number(unitSel.value) }).then(drawPage) },
+      cfg.units.map((x, i) => h('option', { value: i, text: unitLabel(x, i) })));
+    unitSel.value = String(cfg.active);
+    const unitName = h('input', { type: 'text', placeholder: 'Name (optional)', value: u.name || '', maxlength: 24, style: { width: '160px' }, 'aria-label': 'Connection name' });
+    unitName.addEventListener('change', () => saveUnit({ name: unitName.value.trim() }).then(drawPage));
+    const addUnit = h('button', { class: 'btn', title: 'Another saved connection; switch between them in the top bar or the tray', onclick: () => saveConfig({ units: [...cfg.units, { ...NEW_UNIT }], active: cfg.units.length }).then(drawPage) }, 'Add');
+    const rmUnit = h('button', { class: 'btn', title: 'Remove this saved connection', disabled: cfg.units.length < 2, onclick: async () => {
+      if (!(await confirmDlg('Remove this connection?', `${unitLabel(u, cfg.active)} is removed from the saved connections.`, 'Remove'))) return;
+      saveConfig({ units: cfg.units.filter((_, i) => i !== cfg.active), active: 0 }).then(drawPage);
+    } }, 'Remove');
+    const unitsRow = h('div', { class: 'inline', style: { marginBottom: '10px' } }, h('span', { class: 'lab' }, 'Connection'), unitSel, unitName, addUnit, rmUnit);
+    const addr = h('input', { type: 'text', placeholder: 'adi2-pi.local or 192.168.1.20', value: u.pi_address, style: { width: '240px' } });
+    const keyIn = h('input', { type: 'password', placeholder: 'only if set on the ADI-2-Pi', value: u.pi_key || '', autocomplete: 'off', style: { width: '240px' }, 'aria-label': 'Access key' });
     const keyShow = h('button', { class: 'btn', title: 'Show or hide the key', onclick: () => { keyIn.type = keyIn.type === 'password' ? 'text' : 'password'; } }, '👁');
     const keyState = h('div', { class: 'hint', style: { margin: '4px 0 0' } });
     const drawKeyState = () => {
       const p = S.device.problem;
-      const pi = S.config.connection.mode === 'pi';
-      keyState.className = `hint${pi && p && (p.code === 'pi-auth' || p.code === 'pi-locked') ? ' bad' : ''}`;
-      keyState.textContent = pi && p && (p.code === 'pi-auth' || p.code === 'pi-locked') ? p.text
-        : pi && S.device.connected && S.config.connection.pi_key ? 'Key accepted.' : 'Set on the ADI-2-Pi\'s System tab. Leave empty if the bridge has none.';
+      const pi = unit().mode === 'pi';
+      const bad = pi && p && (p.code === 'pi-auth' || p.code === 'pi-locked');
+      keyState.className = `hint${bad ? ' bad' : ''}`;
+      keyState.textContent = bad ? p.text
+        : pi && S.device.connected && S.device.read_only ? 'View only: this ADI-2-Pi shows its state without a key; changes need the key set on its System tab.'
+          : pi && S.device.connected && unit().pi_key ? 'Key accepted.' : 'Set on the ADI-2-Pi\'s System tab. Leave empty if the bridge has none.';
     };
     drawKeyState();
     pageSubs.add(drawKeyState);
     const connectPi = () => {
       if (!addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); return; }
-      saveConfig({ connection: { mode: 'pi', pi_address: addr.value.trim(), pi_key: keyIn.value.trim() } });
+      saveUnit({ mode: 'pi', pi_address: addr.value.trim(), pi_key: keyIn.value.trim() });
     };
     keyIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectPi(); });
     const found = h('div', { class: 'found' });
@@ -973,34 +1145,51 @@
     const radio = (v, label, small, ...extra) => h('label', null,
       h('input', { type: 'radio', name: 'mode', value: v, checked: mode === v, onchange: () => {
         if (v === 'pi' && !addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); return; }
-        saveConfig({ connection: { mode: v, pi_address: addr.value.trim(), pi_key: keyIn.value.trim() } });
+        saveUnit({ mode: v, pi_address: addr.value.trim(), pi_key: keyIn.value.trim() });
       } }),
       h('div', null, h('div', null, label), small ? h('div', { class: 'hint', style: { margin: 0 } }, small) : null, extra));
+    const demoModel = h('select', { 'aria-label': 'Demo model', onchange: () => saveUnit({ demo_model: demoModel.value }) },
+      [['se', 'ADI-2/4 Pro SE'], ['pro', 'ADI-2 Pro'], ['dac', 'ADI-2 DAC']].map(([v, t]) => h('option', { value: v, text: t })));
+    demoModel.value = u.demo_model || 'pro';
+    const piLink = h('a', { href: '#', title: 'github.com/shells-dw/adi2-pi', onclick: (e) => { e.preventDefault(); invoke('open_adi2_pi_page').catch((err) => toast(err, true)); } }, 'ADI-2-Pi');
     const conn = h('section', { class: 'panel' }, h('h2', null, 'Connection'),
+      unitsRow,
       h('div', { class: 'radio' },
         radio('usb', 'USB on this computer', 'Through the ALSA sequencer, next to PipeWire or JACK. Set MIDI Control to ON on the unit.'),
-        radio('pi', 'ADI-2-Pi on the network', 'An ADI-2 connected to a Raspberry Pi running ADI-2-Pi. The bridge\'s own volume limits apply too.',
+        radio('pi', 'ADI-2-Pi on the network', ['An ADI-2 connected to a Raspberry Pi running ', piLink, '. The bridge\'s own volume limits apply too.'],
           h('div', { class: 'inline', style: { marginTop: '6px' } }, addr, find,
             h('button', { class: 'btn', onclick: connectPi }, 'Connect')),
           h('div', { class: 'inline', style: { marginTop: '6px' } }, keyIn, keyShow, h('span', { class: 'lab' }, 'Access key')),
           keyState, found),
         radio('demo', 'Demo', 'A simulated unit, to look around without one.',
-          h('div', { class: 'inline', style: { marginTop: '6px' } }, cfgSelect('connection.demo_model', [['se', 'ADI-2/4 Pro SE'], ['pro', 'ADI-2 Pro'], ['dac', 'ADI-2 DAC']], 'Demo model')))));
+          h('div', { class: 'inline', style: { marginTop: '6px' } }, demoModel))));
 
     // volume
     const outs = outputs().filter((c) => !S.device.model || shows(key(c.addr, 12), SEC.output.vol, c));
     const numIn = (val, onch, attrs) => { const i = h('input', { type: 'number', step: 0.5, value: val ?? '', placeholder: 'none', ...attrs }); i.addEventListener('change', () => onch(i.value === '' ? null : Number(i.value))); return i; };
+    const profiles = cfg.volume.profiles;
+    const pIdx = cfg.volume.profile;
+    const prof = profiles[pIdx] || profiles[0];
+    const profSel = h('select', { 'aria-label': 'Volume limit profile', onchange: () => saveProfiles(profiles, Number(profSel.value)).then(drawPage) },
+      profiles.map((p, i) => h('option', { value: i, text: p.name })));
+    profSel.value = String(pIdx);
+    const profName = h('input', { type: 'text', value: prof.name, maxlength: 24, style: { width: '140px' }, 'aria-label': 'Profile name' });
+    profName.addEventListener('change', () => saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, name: profName.value.trim() || p.name } : p))).then(drawPage));
+    const addProf = h('button', { class: 'btn', title: 'Another set of limits; switch between them in the tray menu', onclick: () => saveProfiles([...profiles, { name: `Profile ${profiles.length + 1}`, limit: { ...prof.limit } }], profiles.length).then(drawPage) }, 'Add');
+    const rmProf = h('button', { class: 'btn', disabled: profiles.length < 2, onclick: () => saveProfiles(profiles.filter((_, i) => i !== pIdx), 0).then(drawPage) }, 'Remove');
+    const setLimit = (ch, v) => saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, limit: { ...p.limit, [ch]: v } } : p)));
     const volRows = outs.map((c) => h('tr', null,
       h('td', null, chName(c)),
-      h('td', null, numIn(cfg.volume.limit[c.key], (v) => saveConfig({ volume: { limit: { [c.key]: v } } }), { min: -114.5, max: 6, 'aria-label': `${chName(c)} limit` }), ' dB'),
+      h('td', null, numIn(prof.limit[c.key], (v) => setLimit(c.key, v), { min: -114.5, max: 6, 'aria-label': `${chName(c)} limit` }), ' dB'),
       h('td', null, numIn(cfg.volume.recall[c.key], (v) => saveConfig({ volume: { recall: { [c.key]: v } } }), { min: -114.5, max: 6, 'aria-label': `${chName(c)} recall` }), ' dB',
         h('button', { class: 'btn', style: { marginLeft: '6px' }, onclick: () => { const v = get(key(c.addr, 12)); if (v !== undefined) saveConfig({ volume: { recall: { [c.key]: v / 10 } } }).then(() => drawPage()); } }, 'Use current'))));
     const vol = h('section', { class: 'panel' }, h('h2', null, 'Volume'),
+      h('div', { class: 'inline', style: { marginBottom: '8px' } }, h('span', { class: 'lab' }, 'Limit profile'), profSel, profName, addProf, rmProf),
       h('table', { class: 'tbl' }, h('tr', null, h('td', null, 'Output'), h('td', null, 'Limit'), h('td', null, 'Recall')), volRows),
       h('div', { class: 'opts', style: { marginTop: '10px' } },
         opt('Limit volume rise speed', 'Raising the volume in this app, with the keys or the tray', cfgSelect('volume.rise', [[0, 'Off'], [20, '20 dB/s'], [10, '10 dB/s'], [5, '5 dB/s']], 'Rise speed')),
         opt('Step', 'Volume keys, tray and the +/− buttons', cfgSelect('volume.step', [[0.5, '0.5 dB'], [1, '1 dB'], [2, '2 dB'], [3, '3 dB']], 'Step'))),
-      h('p', { class: 'hint' }, 'Limit, link and rise speed apply to changes made in this app, not to the knob on the unit.'));
+      h('p', { class: 'hint' }, 'Limit, link and rise speed apply to changes made in this app, not to the knob on the unit. With more than one profile the tray menu switches between them.'));
 
     // keys
     const keysBox = h('div', { class: 'hint' }, 'Checking…');
@@ -1037,24 +1226,237 @@
         opt('Closing the window keeps the app in the tray', null, cfgSwitch('close_to_tray', 'Close to tray')),
         opt('Start at login', null, cfgSwitch('autostart', 'Autostart')),
         opt('Start without the window', 'Tray only', cfgSwitch('start_hidden', 'Start hidden')),
-        opt('Mouse wheel changes', null, cfgSelect('ui.wheel', [['all', 'All knobs'], ['volume', 'Volume only'], ['off', 'Nothing']], 'Mouse wheel'))),
+        opt('Mouse wheel changes', null, cfgSelect('ui.wheel', [['all', 'All knobs'], ['volume', 'Volume only'], ['off', 'Nothing']], 'Mouse wheel')),
+        opt('Follow the unit', 'Switch to the output whose volume is turned on the unit', cfgSwitch('ui.follow', 'Follow the active output')),
+        opt('Theme', null, cfgSelect('ui.theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Same as the desktop']], 'Theme')),
+        opt('Compact layout', 'Smaller panels and knobs', cfgSwitch('ui.compact', 'Compact')),
+        h('div', { class: 'opt' }, h('div', { class: 'lab' }, 'Keyboard shortcuts', h('small', null, 'In the window')), h('button', { class: 'btn', onclick: showShortcuts }, 'Show')),
+        updatePanelPart()),
       h('p', { class: 'hint' }, 'On GNOME the tray icon needs the AppIndicator extension (Ubuntu has it).'),
       h('div', { class: 'about' },
         h('div', null, h('b', null, `Open ADI-2 Control ${S.version}`), ' · GPL-3.0-or-later · not affiliated with RME'),
         h('div', null, 'Updates, help and bug reports: ',
           h('a', { href: '#', onclick: (e) => { e.preventDefault(); invoke('open_project_page').catch((err) => toast(err, true)); } }, 'github.com/shells-dw/open-adi2-control'))));
 
-    const statusCode = h('code', null, S.status ? S.status.hex : '–');
-    pageSubs.add(() => { statusCode.textContent = S.status ? S.status.hex : '–'; });
+    const statusTable = h('table', { class: 'tbl' });
+    const drawStatus = () => {
+      const st = S.status;
+      const d = S.device;
+      const row = (k, v) => h('tr', null, h('td', null, k), h('td', null, v));
+      const yes = (b) => (b ? 'yes' : 'no');
+      const pro = d.model === 'pro' || d.model === 'se';
+      const modeNames = (SEC.device.basic && namesOf(SEC.device.basic)) || [];
+      const outName = { 0: 'Line Out', 1: chShort(CH.ph12), 2: chShort(CH.ph34) };
+      statusTable.replaceChildren(
+        row('Model', d.model ? S.schema.modelNames[d.model] : '–'),
+        row('Device ID', d.id ? `0x${d.id.toString(16)}` : '–'),
+        row('Connected through', d.port || '–'),
+        unit().mode === 'pi' ? row('Access', d.connected ? (d.read_only ? 'view only (no key)' : 'full') : '–') : null,
+        row('Device mode', st ? `${modeNames[st.mode] ?? '?'} (${st.mode})` : '–'),
+        row('Balanced phones', st ? yes(st.balanced) : '–'),
+        row('DSD decode', st ? String(st.dsd) : '–'),
+        row('Active output', st ? `${st.active_out}${outName[st.active_out] ? ` · ${outName[st.active_out]}?` : ''}` : '–'),
+        row('Active line', st ? String(st.active_line) : '–'),
+        pro ? row('AES input signal', st ? yes(st.aes_in) : '–') : null,
+        pro ? row('SPDIF input signal', st ? yes(st.spdif_in) : '–') : null,
+        row('Revision / protocol', st ? `${st.revision} / ${st.protocol}` : '–'),
+        row('IOStatus 1 / 2', st ? h('code', null, `${st.io1.toString(16).padStart(7, '0')} ${st.io2.toString(16).padStart(7, '0')}`) : '–'),
+        row('Status message', h('code', null, st ? st.hex : '–')));
+    };
+    drawStatus();
+    pageSubs.add(drawStatus);
     const status = h('section', { class: 'panel' }, h('h2', null, 'Unit'),
-      h('table', { class: 'tbl' },
-        h('tr', null, h('td', null, 'Model'), h('td', null, S.device.model ? S.schema.modelNames[S.device.model] : '–')),
-        h('tr', null, h('td', null, 'Device ID'), h('td', null, S.device.id ? `0x${S.device.id.toString(16)}` : '–')),
-        h('tr', null, h('td', null, 'Connected through'), h('td', null, S.device.port || '–')),
-        h('tr', null, h('td', null, 'Status message'), h('td', null, statusCode))),
+      statusTable,
+      h('p', { class: 'hint' }, 'Fields after "Device mode" are read from the unit\'s status message; "Active output" and the IOStatus words are only partly documented.'),
       h('div', { class: 'inline', style: { marginTop: '8px' } }, h('button', { class: 'btn', onclick: () => invoke('refresh').then(() => toast('Reading all settings again')).catch((e) => toast(e, true)) }, 'Read everything again')));
 
     return h('div', { class: 'page' }, h('div', { class: 'row2' }, conn, keys), h('div', { class: 'row2' }, vol, popup), h('div', { class: 'row2' }, app, status));
+  }
+
+  // ---------------------------------------------------------------- updates
+  /** Release notes (GitHub Markdown) as plain elements: paragraphs, "- " lists, **bold**, `code`, headings. */
+  function mdLite(text) {
+    const inline = (line) => {
+      const out = [];
+      const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+      let last = 0;
+      for (const m of line.matchAll(re)) {
+        if (m.index > last) out.push(line.slice(last, m.index));
+        const t = m[0];
+        if (t.startsWith('**')) out.push(h('b', null, t.slice(2, -2)));
+        else if (t.startsWith('`')) out.push(h('code', null, t.slice(1, -1)));
+        else out.push(t.slice(1, t.indexOf(']'))); // link text only
+        last = m.index + t.length;
+      }
+      if (last < line.length) out.push(line.slice(last));
+      return out;
+    };
+    const box = h('div', { class: 'notes' });
+    let list = null;
+    for (const raw of String(text || '').replace(/\r/g, '').split('\n')) {
+      const line = raw.trimEnd();
+      const li = line.match(/^\s*[-*] (.*)$/);
+      if (li) {
+        if (!list) { list = h('ul'); box.append(list); }
+        list.append(h('li', null, inline(li[1])));
+        continue;
+      }
+      list = null;
+      if (!line.trim()) continue;
+      const hd = line.match(/^#{1,6} (.*)$/);
+      box.append(hd ? h('h4', null, inline(hd[1])) : h('p', null, inline(line)));
+    }
+    if (!box.childElementCount) box.append(h('p', { class: 'hint' }, 'No release notes.'));
+    return box;
+  }
+
+  const openRelease = (url) => invoke('open_release_link', { url }).catch((e) => toast(e, true));
+
+  function installHint(u, r) {
+    if (u.install === 'deb' && r.download) return h('p', { class: 'hint' }, 'Download it, then install it over this version: ', h('code', null, `sudo apt install ./${r.download.name}`), '. Settings are kept.');
+    if (u.install === 'appimage' && r.download) return h('p', { class: 'hint' }, 'Download it and replace ', h('code', null, u.appimage || 'your AppImage'), ' with it (make it executable). Settings are kept.');
+    if (u.install === 'rpm' && r.download) return h('p', { class: 'hint' }, 'Download it, then install it over this version: ', h('code', null, `sudo dnf install ./${r.download.name}`), ' (or zypper). Settings are kept.');
+    if (u.install === 'pacman') return h('p', { class: 'hint' }, 'Installed from the AUR: update it with your AUR helper once the package is updated.');
+    if (u.install === 'flatpak') return h('p', { class: 'hint' }, 'Installed as a Flatpak: ', h('code', null, 'flatpak update'), ' once the Flatpak is updated.');
+    return h('p', { class: 'hint' }, 'Get it from the release page.');
+  }
+
+  function showRelease(r) {
+    const u = S.update || {};
+    const d = dialog(`${r.name}`, h('div', { style: { maxWidth: '560px' } },
+      h('div', { class: 'hint', style: { marginTop: 0 } }, `Version ${r.version}${r.published ? ` · ${r.published}` : ''} · you have ${S.version}`),
+      h('div', { class: 'notes-box' }, mdLite(r.notes)),
+      installHint(u, r)), [
+      h('button', { class: 'btn', onclick: () => { d.close(); invoke('update_skip', { version: r.version }).then((v) => { S.update = v; renderUpdBar(); }); } }, 'Skip this version'),
+      h('button', { class: 'btn', onclick: () => openRelease(r.url) }, 'Release page'),
+      r.download ? h('button', { class: 'btn primary', onclick: () => openRelease(r.download.url) }, `Download ${r.download.name.endsWith('.deb') ? '.deb' : r.download.name.endsWith('.rpm') ? '.rpm' : 'AppImage'}`) : null,
+      h('button', { class: 'btn', autofocus: true, onclick: () => d.close() }, 'Close'),
+    ]);
+  }
+
+  function renderUpdBar() {
+    const bar = $('#updBar');
+    const r = S.update && S.update.offer;
+    if (!r || S.updDismissed === r.version) { bar.hidden = true; return; }
+    bar.hidden = false;
+    bar.replaceChildren(
+      h('span', null, h('b', null, `Version ${r.version}`), ' of Open ADI-2 Control is available.'),
+      h('button', { class: 'btn', onclick: () => showRelease(r) }, 'What\'s new'),
+      h('button', { class: 'linkbtn', title: 'Hide until the next start', onclick: () => { S.updDismissed = r.version; renderUpdBar(); } }, '✕'));
+  }
+
+  /** Settings → App: switch, last result, Check now. */
+  function updatePanelPart() {
+    const line = h('div', { class: 'hint', style: { margin: 0 } });
+    const btn = h('button', { class: 'btn', onclick: () => {
+      btn.disabled = true;
+      invoke('update_check').then((v) => { S.update = v; renderUpdBar(); draw(); }).catch((e) => toast(e, true)).finally(() => { btn.disabled = false; });
+    } }, 'Check now');
+    const extra = h('div', { class: 'inline' });
+    function draw() {
+      const u = S.update || {};
+      const when = u.checkedAt ? new Date(u.checkedAt * 1000) : null;
+      const ago = when ? (when.toDateString() === new Date().toDateString() ? `today ${when.toTimeString().slice(0, 5)}` : when.toLocaleDateString()) : null;
+      extra.replaceChildren();
+      line.className = 'hint';
+      if (u.checking) line.textContent = 'Asking GitHub…';
+      else if (u.error) { line.textContent = `Last check${ago ? ` (${ago})` : ''}: ${u.error}`; line.className = 'hint bad'; }
+      else if (u.latest && u.newer) {
+        line.textContent = `Version ${u.latest.version} is available (checked ${ago}).`;
+        extra.append(h('button', { class: 'btn primary', onclick: () => showRelease(u.latest) }, 'What\'s new'));
+      } else if (u.latest) line.textContent = `This is the latest version (checked ${ago}).`;
+      else line.textContent = 'Not checked yet.';
+      btn.disabled = !!u.checking;
+    }
+    draw();
+    pageSubs.add(draw);
+    return [
+      opt('Check GitHub for new versions', 'Once a day. Only asks GitHub for the latest version number; nothing is downloaded or installed.', cfgSwitch('updates.check', 'Check for updates')),
+      h('div', { class: 'opt' }, line, h('div', { class: 'inline', style: { flexWrap: 'nowrap' } }, extra, btn)),
+    ];
+  }
+
+  // ---------------------------------------------------------------- theme, shortcuts, follow
+  const unitLabel = (x, i) => x.name || ({ usb: 'USB', pi: x.pi_address || 'ADI-2-Pi', demo: 'Demo' }[x.mode] || `Connection ${i + 1}`);
+
+  const systemLight = window.matchMedia('(prefers-color-scheme: light)');
+  function applyTheme() {
+    const ui = (S.config && S.config.ui) || {};
+    const theme = ui.theme === 'system' ? (systemLight.matches ? 'light' : 'dark') : ui.theme === 'light' ? 'light' : 'dark';
+    const root = document.documentElement;
+    if (root.dataset.theme !== theme) {
+      root.dataset.theme = theme;
+      for (const k of Object.keys(CSSC)) delete CSSC[k];
+      document.querySelectorAll('canvas.curve').forEach((cv) => cv.dispatchEvent(new Event('themechange')));
+    }
+    root.toggleAttribute('data-compact', !!ui.compact);
+  }
+  systemLight.addEventListener('change', applyTheme);
+
+  /** The output the shortcuts act on: the page's output, else the one the volume keys control. */
+  function shortcutOutput() {
+    if (CH[S.page] && CH[S.page].kind === 'output') return CH[S.page];
+    const t = S.config.keys.target;
+    const c = t === 'auto' ? CH[S.lastOut] : CH[t];
+    return c && has(key(c.addr, 12)) ? c : outputs().find((o) => has(key(o.addr, 12)));
+  }
+
+  const SHORTCUTS = [
+    ['↑ / ↓', 'Volume up / down by the step'],
+    ['Page ↑ / Page ↓', 'Volume up / down by 5 dB'],
+    ['M', 'Mute'], ['D', 'Dim'], ['E', 'EQ on / off'],
+    ['1 – 9', 'Load setup 1 – 9 (asks first)'],
+    ['Ctrl + Page ↑ / ↓', 'Previous / next tab'],
+    ['?', 'This list'],
+  ];
+  function showShortcuts() {
+    const d = dialog('Keyboard shortcuts', h('table', { class: 'tbl' }, SHORTCUTS.map(([k, t]) => h('tr', null, h('td', null, h('code', null, k)), h('td', null, t)))),
+      [h('button', { class: 'btn', onclick: () => d.close() }, 'Close')]);
+    d.querySelector('p') && d.querySelector('p').remove();
+  }
+
+  function onKey(e) {
+    if (e.defaultPrevented || $('#dlg').open || e.target.matches('input, select, textarea')) return;
+    if (e.ctrlKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
+      const tabs = tabList();
+      const i = tabs.findIndex((t) => t.id === S.page);
+      const next = tabs[(i + (e.key === 'PageDown' ? 1 : tabs.length - 1)) % tabs.length];
+      if (next) go(next.id);
+      e.preventDefault();
+      return;
+    }
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.key === '?') { showShortcuts(); e.preventDefault(); return; }
+    if (!online()) return;
+    const c = shortcutOutput();
+    const vol = (dir, db) => {
+      if (!c) return;
+      const k = key(c.addr, 12);
+      const v = get(k);
+      if (v !== undefined) setRaw(k, v + dir * Math.round(db * 10));
+    };
+    const tog = (k) => { if (c && has(k)) setRaw(k, get(k) ? 0 : 1); };
+    switch (e.key) {
+      case 'ArrowUp': vol(1, S.config.volume.step || 1); break;
+      case 'ArrowDown': vol(-1, S.config.volume.step || 1); break;
+      case 'PageUp': vol(1, 5); break;
+      case 'PageDown': vol(-1, 5); break;
+      case 'm': case 'M': tog(key(c.addr, 15)); break;
+      case 'd': case 'D': tog(key(c.addr, 16)); break;
+      case 'e': case 'E': tog(key(c.eq, 2)); break;
+      default:
+        if (/^[1-9]$/.test(e.key) && S.setups.length) { confirmSetup(Number(e.key)); break; }
+        return;
+    }
+    e.preventDefault();
+  }
+
+  /** Follow the output the unit is working on (knob turned, or the status says so). */
+  function followOutput(chKey) {
+    if (!S.config || S.config.ui.follow === false || !chKey || !CH[chKey] || S.page === chKey) return;
+    if (!(CH[S.page] && CH[S.page].kind === 'output')) return; // only while an output page is open
+    if ($('#dlg').open) return;
+    go(chKey);
   }
 
   // ---------------------------------------------------------------- tabs / render
@@ -1062,7 +1464,9 @@
     const t = [];
     if (avail(CH.in)) t.push({ id: 'in', label: chShort(CH.in) });
     for (const c of outputs()) if (avail(c)) t.push({ id: c.key, label: chShort(c) });
-    t.push({ id: 'device', label: 'Device', sep: true }, { id: 'presets', label: 'EQ Presets' }, { id: 'settings', label: 'Settings', sep: true });
+    t.push({ id: 'device', label: 'Device', sep: true }, { id: 'presets', label: 'EQ Presets' });
+    if (window.HP) t.push({ id: 'hp', label: 'Headphone EQ' });
+    t.push({ id: 'settings', label: 'Settings', sep: true });
     return t;
   }
   function renderTabs() {
@@ -1085,22 +1489,27 @@
     const main = $('#main');
     let page;
     if (!S.schema || !S.config) return;
-    const unitPage = !['settings', 'presets'].includes(S.page);
+    if (DEBUG) log(`draw ${S.page} online=${online()} usable=${usable()} p=${S.p.size} ready=${S.device.ready}`);
+    const unitPage = !['settings', 'presets', 'hp'].includes(S.page);
     if (unitPage && !S.device.connected) {
       page = h('div', { class: 'empty-page' },
-        h('div', { class: 'big' }, S.config.connection.mode === 'pi' ? 'ADI-2-Pi not reachable' : 'No ADI-2 connected'),
+        h('div', { class: 'big' }, unit().mode === 'pi' ? 'ADI-2-Pi not reachable' : 'No ADI-2 connected'),
         h('p', null, (S.device.problem && S.device.problem.text) || 'Looking for the unit…'),
         h('div', { class: 'inline', style: { justifyContent: 'center', marginTop: '14px' } },
           h('button', { class: 'btn', onclick: () => go('settings') }, 'Connection settings'),
-          S.config.connection.mode !== 'demo' ? h('button', { class: 'btn', onclick: () => saveConfig({ connection: { mode: 'demo' } }) }, 'Try the demo') : null));
+          unit().mode !== 'demo' ? h('button', { class: 'btn', onclick: () => saveUnit({ mode: 'demo' }) }, 'Try the demo') : null));
     } else if (S.page === 'in') page = pageInput();
     else if (CH[S.page] && CH[S.page].kind === 'output') page = pageOutput(CH[S.page]);
     else if (S.page === 'device') page = pageDevice();
     else if (S.page === 'presets') page = pagePresets();
+    else if (S.page === 'hp') page = window.HP ? window.HP.page(ctx()) : h('div', { class: 'empty-page' }, 'Headphone EQ is not available in this build.');
     else page = pageSettings();
     main.replaceChildren(page);
-    main.classList.toggle('locked', !usable());
+    main.classList.toggle('locked', !online());
   }
+
+  /** What the headphone EQ tab (hp.js) needs from here. */
+  const ctx = () => ({ h, s, S, invoke, toast, dialog, confirmDlg, field, opt, knob, fmtHz, importPresets, model, chName, outputs, go, cssColor, usable, guard, get, has, key, SEC, CH });
 
   function renderConn() {
     const el = $('#conn');
@@ -1112,25 +1521,42 @@
     else {
       const sr = SEC.device.srate && get(key(12, SEC.device.srate.idx));
       const srn = sr !== undefined && namesOf(SEC.device.srate) ? namesOf(SEC.device.srate)[sr] : null;
-      const via = S.config && S.config.connection.mode === 'pi' ? ' · via ADI-2-Pi' : S.config && S.config.connection.mode === 'demo' ? ' · Demo' : '';
+      const via = unit().mode === 'pi' ? ' · via ADI-2-Pi' : unit().mode === 'demo' ? ' · Demo' : '';
       text = `${S.schema.modelNames[d.model] || 'ADI-2'}${srn ? ` · ${srn}` : ''}${via}`;
       cls = 'ok';
     }
     el.className = `conn ${cls}`;
     $('#connText').textContent = text;
     el.title = d.port || '';
+    // view-only badge (ADI-2-Pi without its key)
+    const badge = $('#viewOnly');
+    badge.hidden = !(d.connected && d.read_only);
+    // saved connections
+    const us = $('#units');
+    const units = (S.config && S.config.units) || [];
+    us.hidden = units.length < 2;
+    if (units.length > 1) {
+      us.replaceChildren(...units.map((x, i) => h('option', { value: i, text: unitLabel(x, i) })));
+      us.value = String(S.config.active);
+    }
     const banner = $('#banner');
     const show = d.connected && !d.answering && d.problem;
     banner.hidden = !show;
     if (show) banner.textContent = d.problem.text;
-    $('#main').classList.toggle('locked', !usable());
+    $('#main').classList.toggle('locked', !online());
   }
 
   // ---------------------------------------------------------------- updates from the app
   let lastShape = '';
-  const shape = () => JSON.stringify([S.device.connected, S.device.ready, S.device.model, S.device.answering && S.device.connected]);
+  let redrawTimer = 0;
+  function scheduleRedraw() {
+    clearTimeout(redrawTimer);
+    redrawTimer = setTimeout(() => { if (!$('#dlg').open) drawPage(); else scheduleRedraw(); }, 200);
+  }
+  const shape = () => JSON.stringify([S.device.connected, S.device.ready, S.device.model, S.device.answering && S.device.connected, S.device.read_only]);
 
   function onUpdate(u) {
+    if (DEBUG) log(`update ${u.kind}${u.kind === 'device' ? ` ${JSON.stringify(u.device)}` : u.kind === 'params' ? ` ${Object.keys(u.p).length} keys` : ''}`);
     switch (u.kind) {
       case 'reset':
         S.p.clear();
@@ -1145,12 +1571,17 @@
       }
       case 'params': {
         const ks = Object.keys(u.p);
+        // a parameter the page didn't know when it was drawn (the unit reported it after
+        // "ready"): draw the page again so its control appears
+        const fresh = S.device.ready && ks.some((k) => !S.p.has(k));
         for (const k of ks) S.p.set(k, u.p[k]);
+        if (fresh) scheduleRedraw();
         if (u.origin === 'device' && S.device.ready) {
           for (const c of outputs()) if (u.p[key(c.addr, 12)] !== undefined) S.lastOut = c.key;
         }
+        if (u.turned) followOutput(u.turned);
         notify(ks);
-        if (ks.includes('12.16')) renderConn();
+        if (SEC.device.srate && ks.includes(key(12, SEC.device.srate.idx))) renderConn();
         break;
       }
       case 'setups':
@@ -1165,14 +1596,25 @@
           drawPage();
         } else for (const fn of pageSubs) fn();
         break;
-      case 'status':
+      case 'status': {
+        const prev = S.status;
         S.status = u.status;
+        // ADI-2 DAC: byte 6 bits 1–0 name the active output (0 Line, 1 Phones, 2 IEM assumed)
+        if (prev && u.status && prev.active_out !== u.status.active_out && S.device.model === 'dac') followOutput(['line', 'ph12', 'ph34'][u.status.active_out]);
+        if (S.page === 'settings') for (const fn of pageSubs) fn();
+        break;
+      }
+      case 'updates':
+        S.update = u.update;
+        renderUpdBar();
         if (S.page === 'settings') for (const fn of pageSubs) fn();
         break;
       case 'config': {
-        const modeChanged = S.config && JSON.stringify(S.config.connection) !== JSON.stringify(u.config.connection);
+        const before = S.config && JSON.stringify([unit(), S.config.units.length]);
         S.config = u.config;
-        if (modeChanged) { S.editor = null; renderConn(); drawPage(); }
+        applyTheme();
+        const unitChanged = before !== JSON.stringify([unit(), S.config.units.length]);
+        if (unitChanged) { S.editor = null; S.ab = null; renderConn(); drawPage(); } else for (const fn of pageSubs) fn();
         break;
       }
       default:
@@ -1180,8 +1622,10 @@
     }
   }
 
-  window.addEventListener('error', (e) => toast(`Window error: ${e.message}`, true));
-  window.addEventListener('unhandledrejection', (e) => toast(`Window error: ${e.reason}`, true));
+  const log = (msg) => invoke('ui_log', { msg: String(msg) }).catch(() => {});
+  if (window.HP && DEBUG) window.HP.log = log;
+  window.addEventListener('error', (e) => { log(`error: ${e.message} (${e.filename}:${e.lineno})`); toast(`Window error: ${e.message}`, true); });
+  window.addEventListener('unhandledrejection', (e) => { log(`rejection: ${e.reason && e.reason.stack || e.reason}`); toast(`Window error: ${e.reason}`, true); });
 
   // ---------------------------------------------------------------- start
   async function start() {
@@ -1190,6 +1634,7 @@
     for (const sec of ['output', 'input', 'eq', 'device']) SEC[sec] = Object.fromEntries(S.schema.params[sec].map((p) => [p.id, p]));
     SEC.eqByIdx = Object.fromEntries(S.schema.params.eq.map((p) => [p.idx, p]));
     CH = Object.fromEntries(S.schema.channels.map((c) => [c.key, c]));
+    if (DEBUG) log(`snapshot 1: p=${Object.keys(snap.p).length} device=${JSON.stringify(snap.device)}`);
     S.device = snap.device;
     S.p = new Map(Object.entries(snap.p));
     S.setups = snap.setups;
@@ -1198,14 +1643,22 @@
     S.config = snap.config;
     S.lastOut = snap.lastOut;
     S.version = snap.version;
+    S.update = snap.update;
+    applyTheme();
+    renderUpdBar();
     S.page = S.config.ui.page || 'line';
     lastShape = shape();
     renderTabs();
     renderConn();
     drawPage();
+    window.addEventListener('keydown', onKey);
+    $('#viewOnly').addEventListener('click', askKey);
+    $('#units').addEventListener('change', (e) => saveConfig({ active: Number(e.target.value) }));
     await listen('update', (e) => onUpdate(e.payload));
+    await listen('ask', (e) => { if (e.payload && e.payload.setup) confirmSetup(e.payload.setup); });
     // anything that arrived between the snapshot and listening
     const again = await invoke('snapshot');
+    if (DEBUG) log(`snapshot 2: p=${Object.keys(again.p).length}`);
     S.device = again.device;
     S.p = new Map(Object.entries(again.p));
     S.setups = again.setups;

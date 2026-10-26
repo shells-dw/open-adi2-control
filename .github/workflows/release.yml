@@ -1,5 +1,5 @@
-# Builds the release packages when a tag vX.Y.Z is pushed, and attaches them to a draft
-# release whose text comes from RELEASE-NOTES-X.Y.Z.md. Publish the draft on GitHub afterwards.
+# Builds the release packages (.deb, .rpm, AppImage) when a tag vX.Y.Z is pushed, and attaches
+# them to a draft release whose text comes from RELEASE-NOTES-X.Y.Z.md. Publish the draft on GitHub afterwards.
 # Built on Ubuntu 22.04, so the packages run on glibc 2.35 and newer.
 name: Release
 
@@ -76,6 +76,8 @@ jobs:
           mkdir dist
           cp src-tauri/target/release/bundle/deb/*.deb "dist/open-adi2-control_${VER}_${{ matrix.arch }}.deb"
           cp src-tauri/target/release/bundle/appimage/*.AppImage "dist/open-adi2-control_${VER}_${{ matrix.arch }}.AppImage"
+          # rpm: name as built (open-adi2-control-X.Y.Z-1.x86_64.rpm / .aarch64.rpm)
+          cp src-tauri/target/release/bundle/rpm/*.rpm dist/
           cd dist && sha256sum * > "SHA256SUMS-${{ matrix.arch }}.txt" && cat "SHA256SUMS-${{ matrix.arch }}.txt"
       - name: Upload to the draft release
         env:

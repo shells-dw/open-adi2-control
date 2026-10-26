@@ -7,6 +7,10 @@
 //! and asks for the key (no reconnect loop, the bridge locks out after 10 wrong keys a minute);
 //! 4429 (locked out) waits 61 s.
 //!
+//! A bridge set to "key needed for changes only" accepts a keyless connection with
+//! `hello.access: "read"`: values are shown, commands are refused until the key is entered.
+//! `{ t: "access" }` changes that for an open connection.
+//!
 //! The bridge works with the same protocol integers and "addr.idx" keys as the USB engine, so
 //! its messages map straight onto the app's model. The bridge's own volume limits apply on top.
 
@@ -17,7 +21,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
@@ -92,7 +97,7 @@ fn unit_status(m: &Value) -> Option<protocol::Status> {
     to_status(&m["unitStatus"]).or_else(|| to_status(&m["status"]))
 }
 
-fn to_device(v: &Value, label: &str) -> DeviceInfo {
+fn to_device(v: &Value, label: &str, read_only: bool) -> DeviceInfo {
     let problem = v.get("problem").and_then(|p| {
         Some(Problem::new(p.get("code")?.as_str().unwrap_or("pi"), p.get("text")?.as_str().unwrap_or("").to_string()))
     });
@@ -104,6 +109,7 @@ fn to_device(v: &Value, label: &str) -> DeviceInfo {
         model: v["model"].as_str().map(Into::into),
         port: Some(label.to_string()),
         problem,
+        read_only,
     }
 }
 
@@ -187,8 +193,38 @@ fn wait(rx: &Receiver<In>, d: Option<Duration>) -> bool {
     }
 }
 
-pub fn run(address: String, key: String, rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
+pub fn run(address: String, key: String, hub_rx: Receiver<In>, out: Box<dyn Fn(Update) + Send>) {
     let label = format!("ADI-2-Pi at {address}");
+    // commands come through a second channel plus a wake-up byte on a pipe, so a session can
+    // wait on the socket and on commands at the same time (poll)
+    let (pipe_w, pipe_r) = match UnixStream::pair() {
+        Ok(p) => p,
+        Err(e) => {
+            out(Update::Device(DeviceInfo { problem: Some(Problem::new("pi", format!("pipe: {e}"))), ..Default::default() }));
+            return;
+        }
+    };
+    pipe_r.set_nonblocking(true).ok();
+    let (ctx, rx) = std::sync::mpsc::channel::<In>();
+    std::thread::Builder::new()
+        .name("adi2-pi-cmds".into())
+        .spawn(move || {
+            let mut pipe_w = pipe_w;
+            for m in hub_rx.iter() {
+                let stop = matches!(m, In::Stop);
+                if ctx.send(m).is_err() {
+                    return;
+                }
+                let _ = std::io::Write::write(&mut pipe_w, &[1]);
+                if stop {
+                    return;
+                }
+            }
+            // the hub dropped its sender
+            let _ = ctx.send(In::Stop);
+            let _ = std::io::Write::write(&mut pipe_w, &[1]);
+        })
+        .ok();
     let Some((host, port)) = parse_address(&address) else {
         out(Update::Device(DeviceInfo { problem: Some(Problem::new("pi", format!("“{address}” is not an address"))), ..Default::default() }));
         let _ = rx.recv();
@@ -198,7 +234,7 @@ pub fn run(address: String, key: String, rx: Receiver<In>, out: Box<dyn Fn(Updat
     out(Update::Device(offline("pi", format!("Connecting to {label}…"))));
     loop {
         let ended = match connect(&host, port, &key) {
-            Ok(ws) => session(ws, &label, &rx, &out),
+            Ok(ws) => session(ws, &label, &rx, &pipe_r, &out),
             Err(e) => e,
         };
         match ended {
@@ -231,83 +267,147 @@ pub fn run(address: String, key: String, rx: Receiver<In>, out: Box<dyn Fn(Updat
     }
 }
 
-/// One connection, until it ends.
-fn session(mut ws: WebSocket<TcpStream>, label: &str, rx: &Receiver<In>, out: &(dyn Fn(Update) + Send)) -> Ended {
+/// One connection, until it ends. Waits with poll(2) on the socket and on a pipe that the
+/// forwarder thread writes to when a command arrives, so commands go out at once and the
+/// thread sleeps otherwise.
+fn session(mut ws: WebSocket<TcpStream>, label: &str, rx: &Receiver<In>, pipe_r: &UnixStream, out: &(dyn Fn(Update) + Send)) -> Ended {
+    use std::io::Read as _;
+    use std::os::unix::io::AsRawFd;
+
     out(Update::Reset);
-    let mut alive = Instant::now();
-    let mut auth_err = false;
+    let sock_fd = ws.get_ref().as_raw_fd();
+    ws.get_ref().set_read_timeout(Some(Duration::from_secs(2))).ok();
+    ws.get_ref().set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let mut pipe_r = pipe_r;
     {
-        loop {
-            // commands from the app
+        let mut alive = Instant::now();
+        let mut hello_seen = false;
+        let mut auth_err = false;
+        let mut read_only = false;
+        let mut device = DeviceInfo::default();
+        // the first messages can come with the handshake response and sit in the reader's buffer
+        let mut first = true;
+        let result = 'session: loop {
+            let mut fds = [
+                libc::pollfd { fd: sock_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: pipe_r.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            ];
+            let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, if first { 0 } else { 1000 }) };
+            if n < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                break Ended::Lost("poll failed".into());
+            }
+            if fds[1].revents != 0 {
+                let mut buf = [0u8; 64];
+                while matches!(pipe_r.read(&mut buf), Ok(n) if n > 0) {}
+                let mut stop = false;
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        In::Cmd(c) => {
+                            if ws.send(Message::text(command_json(c).to_string())).is_err() {
+                                break;
+                            }
+                        }
+                        In::Stop => stop = true,
+                        In::Link(_) => {}
+                    }
+                }
+                if stop {
+                    let _ = ws.close(None);
+                    break Ended::Lost("stop".into());
+                }
+            }
+            if fds[0].revents == 0 && !first {
+                // the bridge pings every 25 s
+                if alive.elapsed() > Duration::from_secs(60) {
+                    break Ended::Lost("no answer for 60 s".into());
+                }
+                continue;
+            }
+            // Read everything there is: several messages can arrive in one TCP read, and what
+            // the WebSocket reader has buffered doesn't wake poll() again.
+            first = false;
+            ws.get_ref().set_nonblocking(true).ok();
             loop {
-                match rx.try_recv() {
-                    Ok(In::Cmd(c)) => {
-                        let _ = ws.send(Message::text(command_json(c).to_string()));
+                match ws.read() {
+                    Ok(Message::Text(t)) => {
+                        alive = Instant::now();
+                        let Ok(m) = serde_json::from_str::<Value>(t.as_str()) else { continue };
+                        let kind = m["t"].as_str().unwrap_or("");
+                        match kind {
+                            "hello" | "device" => {
+                                if kind == "hello" {
+                                    hello_seen = true;
+                                    read_only = m["access"] == "read";
+                                }
+                                device = to_device(&m["device"], label, read_only);
+                                out(Update::Device(device.clone()));
+                            }
+                            "access" => {
+                                read_only = m["access"] == "read";
+                                device.read_only = read_only;
+                                out(Update::Device(device.clone()));
+                            }
+                            "state" => {
+                                device = to_device(&m["device"], label, read_only);
+                                out(Update::Device(device.clone()));
+                                out(Update::Params(to_params(&m["p"]), Origin::Device));
+                                if let Some(s) = setups(&m["setups"]) {
+                                    out(Update::Setups(s));
+                                }
+                                out(Update::Presets(to_presets(&m["eqPresets"])));
+                                if let Some(s) = unit_status(&m) {
+                                    out(Update::Status(s));
+                                }
+                            }
+                            "p" => out(Update::Params(to_params(&m["p"]), Origin::Device)),
+                            "setups" => {
+                                if let Some(s) = setups(&m["setups"]) {
+                                    out(Update::Setups(s));
+                                }
+                            }
+                            "eqpresets" => out(Update::Presets(to_presets(&m["eqPresets"]))),
+                            "status" => {
+                                if let Some(s) = unit_status(&m) {
+                                    out(Update::Status(s));
+                                }
+                            }
+                            // before the hello: the key was refused and a close follows
+                            "err" if m["status"] == 401 && !hello_seen => auth_err = true,
+                            "err" if m["status"] == 429 => break 'session Ended::Locked,
+                            // a refused set: the model took it already, so read the state again
+                            "err" if m["status"] == 400 || m["status"] == 409 || (m["status"] == 401 && read_only) => {
+                                let _ = ws.send(Message::text(json!({ "t": "get" }).to_string()));
+                            }
+                            _ => {}
+                        }
                     }
-                    Ok(In::Stop) | Err(TryRecvError::Disconnected) => {
-                        let _ = ws.close(None);
-                        return Ended::Lost("stop".into());
+                    Ok(Message::Ping(_)) => {
+                        alive = Instant::now();
+                        // the pong is queued by read(); send it now, not with the next read or write
+                        // (the bridge drops a connection that answers no ping within 50 s)
+                        let _ = ws.flush(); // (non-blocking here; what doesn't go out now is flushed below)
                     }
-                    Ok(In::Link(_)) => {}
-                    Err(TryRecvError::Empty) => break,
+                    Ok(Message::Pong(_)) => alive = Instant::now(),
+                    Ok(Message::Close(frame)) => {
+                        let code = frame.map(|f| u16::from(f.code)).unwrap_or(0);
+                        break 'session match code {
+                            4401 => Ended::Auth,
+                            4429 => Ended::Locked,
+                            _ if auth_err => Ended::Auth,
+                            _ => Ended::Lost("connection closed".into()),
+                        };
+                    }
+                    Ok(_) => {}
+                    // nothing more buffered or on the socket
+                    Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => break,
+                    Err(_) if auth_err => break 'session Ended::Auth,
+                    Err(e) => break 'session Ended::Lost(e.to_string()),
                 }
             }
-            match ws.read() {
-                Ok(Message::Text(t)) => {
-                    alive = Instant::now();
-                    let Ok(m) = serde_json::from_str::<Value>(t.as_str()) else { continue };
-                    match m["t"].as_str().unwrap_or("") {
-                        "hello" | "device" => out(Update::Device(to_device(&m["device"], label))),
-                        "state" => {
-                            out(Update::Device(to_device(&m["device"], label)));
-                            out(Update::Params(to_params(&m["p"]), Origin::Device));
-                            if let Some(s) = setups(&m["setups"]) {
-                                out(Update::Setups(s));
-                            }
-                            out(Update::Presets(to_presets(&m["eqPresets"])));
-                            if let Some(s) = unit_status(&m) {
-                                out(Update::Status(s));
-                            }
-                        }
-                        "p" => out(Update::Params(to_params(&m["p"]), Origin::Device)),
-                        "setups" => {
-                            if let Some(s) = setups(&m["setups"]) {
-                                out(Update::Setups(s));
-                            }
-                        }
-                        "eqpresets" => out(Update::Presets(to_presets(&m["eqPresets"]))),
-                        "status" => {
-                            if let Some(s) = unit_status(&m) {
-                                out(Update::Status(s));
-                            }
-                        }
-                        // the bridge says why before it closes
-                        "err" if m["status"] == 401 => auth_err = true,
-                        "err" if m["status"] == 429 => return Ended::Locked,
-                        _ => {}
-                    }
-                }
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => alive = Instant::now(),
-                Ok(Message::Close(frame)) => {
-                    let code = frame.map(|f| u16::from(f.code)).unwrap_or(0);
-                    return match code {
-                        4401 => Ended::Auth,
-                        4429 => Ended::Locked,
-                        _ if auth_err => Ended::Auth,
-                        _ => Ended::Lost("connection closed".into()),
-                    };
-                }
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    // the bridge pings every 25 s
-                    if alive.elapsed() > Duration::from_secs(60) {
-                        return Ended::Lost("no answer for 60 s".into());
-                    }
-                }
-                Err(_) if auth_err => return Ended::Auth,
-                Err(e) => return Ended::Lost(e.to_string()),
-            }
-        }
+            ws.get_ref().set_nonblocking(false).ok();
+            let _ = ws.flush();
+        };
+        result
     }
 }
 
@@ -371,5 +471,95 @@ mod status_tests {
         let m = json!({ "t": "state", "status": hex });
         assert_eq!(unit_status(&m).unwrap().hex, hex);
         assert!(unit_status(&json!({ "t": "err", "status": 401 })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::model::Update;
+    use std::sync::{Arc, Mutex};
+
+    /// Needs the stand-in bridge: `node fake-bridge.js 8098 s3cret`.
+    #[test]
+    #[ignore]
+    fn commands_reach_the_bridge_at_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        std::thread::spawn(move || {
+            run("127.0.0.1:8098".into(), "s3cret".into(), rx, Box::new(move |u| match u {
+                Update::Params(p, _) => s2.lock().unwrap().push(format!("{p:?}")),
+                Update::Device(d) => s2.lock().unwrap().push(format!("device ro={}", d.read_only)),
+                _ => {}
+            }))
+        });
+        std::thread::sleep(Duration::from_millis(800));
+        let t0 = Instant::now();
+        tx.send(In::Cmd(Command::Set(vec![("3.12".into(), -123)]))).unwrap();
+        let mut got = false;
+        while t0.elapsed() < Duration::from_secs(2) {
+            if seen.lock().unwrap().iter().any(|s| s.contains("-123")) {
+                got = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(got, "set echoed back by the bridge");
+        assert!(t0.elapsed() < Duration::from_millis(100), "round trip {:?}", t0.elapsed());
+        assert!(seen.lock().unwrap().iter().any(|s| s == "device ro=false"));
+        let _ = tx.send(In::Stop);
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use crate::model::Update;
+    use std::sync::{Arc, Mutex};
+
+    /// Needs the stand-in bridge in view mode: `node fake-bridge.js 8097 s3cret view`.
+    #[test]
+    #[ignore]
+    fn keyless_connection_is_read_only() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        std::thread::spawn(move || {
+            run("127.0.0.1:8097".into(), String::new(), rx, Box::new(move |u| match u {
+                Update::Params(p, _) => s2.lock().unwrap().push(format!("params {}", p.len())),
+                Update::Device(d) => s2.lock().unwrap().push(format!("device connected={} ro={}", d.connected, d.read_only)),
+                _ => {}
+            }))
+        });
+        // (hello and state arrive with the handshake response; they must not wait for a ping)
+        std::thread::sleep(Duration::from_millis(800));
+        let v = seen.lock().unwrap().clone();
+        assert!(v.iter().any(|s| s == "device connected=true ro=true"), "{v:?}");
+        assert!(v.iter().any(|s| s.starts_with("params")), "values arrive read-only: {v:?}");
+        let _ = tx.send(In::Stop);
+    }
+
+    /// The bridge pings every 25 s and drops a connection without a pong within 50 s; the
+    /// session must stay up through that. Needs the view-mode bridge on 8097. Takes 60 s.
+    #[test]
+    #[ignore]
+    fn pings_are_answered() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        std::thread::spawn(move || {
+            run("127.0.0.1:8097".into(), String::new(), rx, Box::new(move |u| {
+                if let Update::Device(d) = u {
+                    s2.lock().unwrap().push(format!("connected={}", d.connected));
+                }
+            }))
+        });
+        std::thread::sleep(Duration::from_secs(60));
+        let v = seen.lock().unwrap().clone();
+        // ("connected=false" before the first connect is the "Connecting…" state)
+        let up = v.iter().position(|s| s == "connected=true").expect("connected");
+        assert!(!v[up..].iter().any(|s| s == "connected=false"), "dropped: {v:?}");
+        let _ = tx.send(In::Stop);
     }
 }
