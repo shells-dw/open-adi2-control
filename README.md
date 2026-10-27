@@ -44,7 +44,8 @@ Not affiliated with RME. "RME" and "ADI-2" are trademarks of RME Intelligent Aud
   layout.
 - The page follows the output whose volume is turned on the unit (can be switched off).
 - Only shows what the connected unit reports (an ADI-2 Pro EX sends no Phones 1/2 Mute, for
-  example).
+  example). A value that RME's MIDI table doesn't list (settings added in newer models, such as
+  on the ADI-2/4 Pro EX) is shown as its number, `#n`.
 
 Changes made on the unit (knob, keys, IR remote) appear in the app. The unit doesn't report
 changes sent over MIDI back, so the app reads the settings back 1.5 s after a change and
@@ -69,13 +70,13 @@ x86-64 PCs, `arm64` for 64-bit ARM (e.g. Raspberry Pi 4/5 with a desktop).
 **Debian, Ubuntu, Mint, Pop!_OS** (Ubuntu 22.04 / Debian 12 or newer):
 
 ```sh
-sudo apt install ./open-adi2-control_0.2.0_amd64.deb
+sudo apt install ./open-adi2-control_0.2.1_amd64.deb
 ```
 
 **Fedora, openSUSE** (`.rpm`, `x86_64` / `aarch64`):
 
 ```sh
-sudo dnf install ./open-adi2-control-0.2.0-1.x86_64.rpm
+sudo dnf install ./open-adi2-control-0.2.1-1.x86_64.rpm
 ```
 
 **Arch Linux**: `packaging/aur/PKGBUILD` builds from the release tag (see
@@ -84,8 +85,8 @@ sudo dnf install ./open-adi2-control-0.2.0-1.x86_64.rpm
 **Other distributions**: the AppImage (glibc 2.35 or newer).
 
 ```sh
-chmod +x open-adi2-control_0.2.0_amd64.AppImage
-./open-adi2-control_0.2.0_amd64.AppImage
+chmod +x open-adi2-control_0.2.1_amd64.AppImage
+./open-adi2-control_0.2.1_amd64.AppImage
 ```
 
 A Flatpak manifest is in `packaging/flatpak/`; it is not on Flathub.
@@ -190,7 +191,7 @@ open-adi2-control get line vol            # one value: -20.0
 open-adi2-control set ph12 vol -30        # absolute
 open-adi2-control set ph12 vol +1.5       # relative: +N, -=N
 open-adi2-control set line mute toggle    # on, off, toggle
-open-adi2-control set line src next       # a choice by name or number, next, prev
+open-adi2-control set line src next       # a choice by name, number or #n, next, prev
 open-adi2-control set line b1g 2.5 R      # right EQ side with Dual EQ
 open-adi2-control setup 2                 # load setup 2 (no confirmation)
 open-adi2-control preset ph12 5           # EQ preset 1–20, manual, temp

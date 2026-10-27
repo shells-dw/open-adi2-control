@@ -1,7 +1,7 @@
 # Maintainer: shells-dw <shells-dw@users.noreply.github.com>
 # Builds Open ADI-2 Control from the release tag.
 pkgname=open-adi2-control
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc='Remote for RME ADI-2 series converters (USB MIDI or ADI-2-Pi)'
 arch=('x86_64' 'aarch64')

@@ -621,17 +621,7 @@ impl Hub {
     pub fn cli(self: &Arc<Self>, args: &[String]) -> Result<String, String> {
         let a = |i: usize| args.get(i).map(|s| s.as_str()).unwrap_or("");
         let model = self.model.lock().unwrap().device.model.clone().unwrap_or_else(|| "pro".into());
-        let fmt = |p: &Value, raw: i32| -> String {
-            match p["type"].as_str().unwrap_or("level") {
-                "toggle" => (if raw != 0 { "on" } else { "off" }).to_string(),
-                "select" => schema::value_names(p, &model, None).and_then(|n| n.get(raw as usize).cloned()).unwrap_or_else(|| raw.to_string()),
-                _ => {
-                    let d = schema::to_display(p, raw);
-                    let dec = p["decimals"].as_u64().unwrap_or(0) as usize;
-                    format!("{d:.dec$}")
-                }
-            }
-        };
+        let fmt = |r: &schema::Resolved, raw: i32| schema::format_value(r.param, &model, r.channel, raw);
         match a(0) {
             "get" if args.len() == 1 => Ok(self.named_state().to_string()),
             "get" => {
@@ -642,7 +632,7 @@ impl Hub {
                 }
                 let r = schema::resolve(ch, id, side).ok_or_else(|| format!("unknown parameter {ch} {id}"))?;
                 let raw = self.value(&key(r.addr, r.idx)).ok_or("not reported by the unit")?;
-                Ok(fmt(r.param, raw))
+                Ok(fmt(&r, raw))
             }
             "set" => {
                 let (ch, id, text) = (a(1), a(2), a(3));
@@ -661,7 +651,7 @@ impl Hub {
                 }
                 let raw = schema::parse_value(r.param, &model, r.channel, text, cur)?;
                 self.set(vec![(k.clone(), raw)])?;
-                Ok(fmt(r.param, self.value(&k).unwrap_or(raw)))
+                Ok(fmt(&r, self.value(&k).unwrap_or(raw)))
             }
             "setup" => {
                 let n: u8 = a(1).parse().map_err(|_| "usage: setup <1-9>")?;
@@ -679,7 +669,7 @@ impl Hub {
                 };
                 let k = key(r.addr, r.idx);
                 self.set(vec![(k.clone(), raw)])?;
-                Ok(fmt(r.param, self.value(&k).unwrap_or(raw)))
+                Ok(fmt(&r, self.value(&k).unwrap_or(raw)))
             }
             "refresh" => {
                 self.command(Command::Refresh)?;
