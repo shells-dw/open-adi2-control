@@ -1,6 +1,6 @@
 [package]
 name = "open-adi2-control"
-version = "0.2.0"
+version = "0.2.1"
 description = "Remote control for RME ADI-2 series converters on Linux"
 authors = ["shells-dw"]
 license = "GPL-3.0-or-later"

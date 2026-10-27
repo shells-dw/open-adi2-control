@@ -157,6 +157,23 @@ pub fn resolve(ch: &str, id: &str, side: &str) -> Option<Resolved> {
     Some(Resolved { addr: c.addr, idx: p["idx"].as_u64()? as u8, param: p, channel: Some(c) })
 }
 
+/// A value as text: "on"/"off", the name of a select value, or the display number.
+/// A select value the list doesn't name (not in RME's table, e.g. from a newer model) is `#n`,
+/// never a neighbouring name.
+pub fn format_value(p: &Value, model: &str, ch: Option<&Channel>, raw: i32) -> String {
+    match p["type"].as_str().unwrap_or("level") {
+        "toggle" => (if raw != 0 { "on" } else { "off" }).to_string(),
+        "select" => value_names(p, model, ch)
+            .and_then(|n| usize::try_from(raw).ok().and_then(|i| n.get(i).cloned()))
+            .unwrap_or_else(|| format!("#{raw}")),
+        _ => {
+            let d = to_display(p, raw);
+            let dec = p["decimals"].as_u64().unwrap_or(0) as usize;
+            format!("{d:.dec$}")
+        }
+    }
+}
+
 /// Display value of a protocol integer (dB, Hz, Q … as in the window).
 pub fn to_display(p: &Value, raw: i32) -> f64 {
     if p["unit"] == "Hz" {
@@ -186,6 +203,10 @@ pub fn parse_value(p: &Value, model: &str, ch: Option<&Channel>, text: &str, cur
         },
         "select" => {
             let names = value_names(p, model, ch).unwrap_or_default();
+            // "#n": the raw number, as `get` prints a value the list doesn't name
+            if let Some(n) = t.strip_prefix('#').and_then(|n| n.parse::<i32>().ok()) {
+                return Ok(n);
+            }
             if let Ok(i) = t.parse::<i32>() {
                 if names.is_empty() || (0..names.len() as i32).contains(&i) {
                     return Ok(i);
@@ -246,6 +267,41 @@ mod cli_tests {
         assert_eq!(parse_value(ty.param, "pro", ty.channel, "peak", None), Ok(0));
         assert_eq!(parse_value(ty.param, "pro", ty.channel, "next", Some(3)), Ok(0), "wraps around");
         assert!(resolve("line", "nothing", "L").is_none());
+        assert_eq!(parse_value(ty.param, "pro", ty.channel, "#7", None), Ok(7), "raw number as printed by get");
         assert_eq!(resolve("device", "srate", "L").map(|r| r.addr), Some(12));
+    }
+}
+
+#[cfg(test)]
+mod value_list_tests {
+    use super::*;
+
+    fn label(model: &str, ch: &str, id: &str, raw: i32) -> String {
+        let r = resolve(ch, id, "L").unwrap();
+        format_value(r.param, model, r.channel, raw)
+    }
+
+    #[test]
+    fn line_levels_per_model() {
+        // ADI-2/4 Pro SE (and Pro EX): five levels, ascending
+        let se: Vec<String> = (0..5).map(|i| label("se", "line", "ref", i)).collect();
+        assert_eq!(se, ["+1 dBu", "+7 dBu", "+13 dBu", "+19 dBu", "+24 dBu"]);
+        assert_eq!(label("pro", "line", "ref", 0), "+4 dBu");
+        assert_eq!(label("pro", "line", "ref", 3), "+24 dBu");
+        assert_eq!(label("dac", "line", "ref", 0), "-5 dBu");
+        // the phones list on phones outputs
+        assert_eq!(label("se", "ph12", "ref", 0), "IEM");
+        assert_eq!(label("pro", "ph34", "ref", 1), "Hi-Power");
+        assert_eq!(model_name("se"), "ADI-2/4 Pro SE / Pro EX");
+    }
+
+    #[test]
+    fn unknown_values_are_numbers() {
+        // 2/4 Pro EX values missing from RME's table: shown as #n
+        assert_eq!(label("pro", "line", "ref", 4), "#4");
+        assert_eq!(label("se", "in", "riaa", 6), "#6");
+        assert_eq!(label("se", "ph34", "src", 6), "#6");
+        assert_eq!(label("se", "line", "ref", -1), "#-1");
+        assert_eq!(label("se", "line", "mute", 1), "on");
     }
 }

@@ -171,6 +171,23 @@
     return b;
   }
 
+  /**
+   * Label of a select value: its name, or `#n` for a number the list doesn't have (values the
+   * unit reports that are not in RME's table, e.g. on newer models). Never a neighbouring name.
+   */
+  const valueLabel = (names, v) => (names && names[v] !== undefined ? names[v] : `#${v}`);
+
+  /**
+   * Show value `v` in a select whose options don't offer it (a hidden or an unknown value):
+   * one extra, disabled option, replaced on the next call.
+   */
+  function showValue(sel, v, label) {
+    sel.querySelectorAll('option.extra').forEach((o) => o.remove());
+    if (v === undefined) { sel.value = ''; return; }
+    if (![...sel.options].some((o) => Number(o.value) === v)) sel.append(h('option', { class: 'extra', value: v, text: label, disabled: true }));
+    sel.value = String(v);
+  }
+
   function selectKey(k, p, c, extra) {
     const names = (extra && extra.names) || namesOf(p, c) || [];
     const hide = p.hide || [];
@@ -178,8 +195,7 @@
       names.map((n, i) => (hide.includes(i) ? null : h('option', { value: i, text: n }))));
     const up = () => {
       const v = get(k);
-      if (v !== undefined && ![...sel.options].some((o) => Number(o.value) === v)) sel.append(h('option', { value: v, text: `(${v})` }));
-      sel.value = v === undefined ? '' : String(v);
+      showValue(sel, v, valueLabel(names, v));
     };
     sub(k, up);
     up();
@@ -617,7 +633,7 @@
       const p = eqParam(b.type);
       const sel = h('select', { 'aria-label': p.label, onchange: () => { src.set(sideOf(), b.type, Number(sel.value)); updateAll(); } },
         (namesOf(p) || []).map((n, i) => h('option', { value: i, text: n })));
-      sel.update = () => { const v = src.get(sideOf(), b.type); sel.value = v === undefined ? '' : String(v); };
+      sel.update = () => { const v = src.get(sideOf(), b.type); showValue(sel, v, valueLabel(namesOf(p), v)); };
       sel.update();
       return sel;
     };
@@ -656,7 +672,8 @@
           return h('option', { value: i, text: t });
         }).filter(Boolean));
         const v = get(presetKey);
-        sel.value = v === undefined ? '' : String(v);
+        const nm = names[v];
+        showValue(sel, v, nm !== undefined ? nm.charAt(0).toUpperCase() + nm.slice(1) : `#${v}`);
       };
       fillSel();
       sub(presetKey, fillSel);
@@ -821,7 +838,7 @@
     if (p.type === 'toggle') ctl = swKey(k, p.label);
     else if (p.type === 'select' && p.readonly) {
       ctl = h('div', { class: 'num' });
-      const up = () => { const n = namesOf(p) || []; ctl.textContent = n[get(k)] ?? (get(k) ?? '–'); };
+      const up = () => { const v = get(k); ctl.textContent = v === undefined ? '–' : valueLabel(namesOf(p), v); };
       sub(k, up); up();
     } else if (p.type === 'select') {
       ctl = selectKey(k, p);
@@ -1149,7 +1166,7 @@
       } }),
       h('div', null, h('div', null, label), small ? h('div', { class: 'hint', style: { margin: 0 } }, small) : null, extra));
     const demoModel = h('select', { 'aria-label': 'Demo model', onchange: () => saveUnit({ demo_model: demoModel.value }) },
-      [['se', 'ADI-2/4 Pro SE'], ['pro', 'ADI-2 Pro'], ['dac', 'ADI-2 DAC']].map(([v, t]) => h('option', { value: v, text: t })));
+      [['se', 'ADI-2/4 Pro SE / Pro EX'], ['pro', 'ADI-2 Pro / Pro EX'], ['dac', 'ADI-2 DAC']].map(([v, t]) => h('option', { value: v, text: t })));
     demoModel.value = u.demo_model || 'pro';
     const piLink = h('a', { href: '#', title: 'github.com/shells-dw/adi2-pi', onclick: (e) => { e.preventDefault(); invoke('open_adi2_pi_page').catch((err) => toast(err, true)); } }, 'ADI-2-Pi');
     const conn = h('section', { class: 'panel' }, h('h2', null, 'Connection'),
@@ -1252,7 +1269,7 @@
         row('Device ID', d.id ? `0x${d.id.toString(16)}` : '–'),
         row('Connected through', d.port || '–'),
         unit().mode === 'pi' ? row('Access', d.connected ? (d.read_only ? 'view only (no key)' : 'full') : '–') : null,
-        row('Device mode', st ? `${modeNames[st.mode] ?? '?'} (${st.mode})` : '–'),
+        row('Device mode', st ? `${valueLabel(modeNames, st.mode)} (${st.mode})` : '–'),
         row('Balanced phones', st ? yes(st.balanced) : '–'),
         row('DSD decode', st ? String(st.dsd) : '–'),
         row('Active output', st ? `${st.active_out}${outName[st.active_out] ? ` · ${outName[st.active_out]}?` : ''}` : '–'),
