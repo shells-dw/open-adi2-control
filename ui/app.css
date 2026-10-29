@@ -159,7 +159,7 @@ header.top {
 .spacer { flex: 1; }
 .badge { align-self: center; white-space: nowrap; background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--warn); border-radius: 12px; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; margin-right: 10px; }
 .badge[hidden] { display: none; }
-.units { align-self: center; max-width: 180px; margin-right: 4px; min-height: 26px; padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
+.units { align-self: center; flex: none; max-width: 180px; margin-right: 4px; min-height: 26px; padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
 .units[hidden] { display: none; }
 .conn { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; padding-left: 12px; min-width: 0; flex: 0 1 auto; }
 .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
@@ -453,9 +453,13 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
 .hp-opts > summary h2::before { content: "▸ "; }
 .hp-opts[open] > summary h2::before { content: "▾ "; }
 .hp-opts[open] > summary { margin-bottom: 10px; }
-.hp-opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
-@media (max-width: 1100px) { .hp-opt-grid { grid-template-columns: 1fr; } }
+/* two columns only when the panel itself has room for them */
+.hp-opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 10px 18px; }
 .hp-opt-grid input[type="number"] { width: 70px; }
+/* label and controls side by side; the controls move below the label when they don't fit */
+.hp-opt { flex-wrap: wrap; row-gap: 4px; }
+.hp-opt > .lab { flex: 1 1 180px; min-width: 0; }
+.hp-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; max-width: 100%; }
 .hp-curve { height: 230px; }
 .hp-legend { display: flex; gap: 14px; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 11.5px; }
 .hp-legend .k::before { content: ""; display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }

@@ -160,7 +160,7 @@
       slowBand: sel('slowBand', [['B5', 'Band 5 as high shelf'], ['BT', 'Treble control']]),
     };
     const unit = (el, u) => h('span', { class: 'inline', style: { gap: '4px', flexWrap: 'nowrap' } }, el, h('span', { class: 'lab' }, u));
-    const row = (label, small, ...c) => h('div', { class: 'opt' }, h('div', { class: 'lab' }, label, small ? h('small', null, small) : null), h('div', { class: 'inline', style: { flexWrap: 'nowrap' } }, c));
+    const row = (label, small, ...c) => h('div', { class: 'opt hp-opt' }, h('div', { class: 'lab' }, label, small ? h('small', null, small) : null), h('div', { class: 'hp-ctl' }, c));
     const resetOpts = h('button', { class: 'btn', onclick: async () => { const K = await core(); st.opt = { ...K.DEFAULTS }; syncOpts(); save(st); run(); } }, 'Defaults');
     const options = h('details', { class: 'panel hp-opts' },
       h('summary', null, h('h2', null, 'Options')),
@@ -173,7 +173,7 @@
         h('div', { class: 'opts' },
           row('Bands', 'At most', ctl.maxBands),
           row('Max boost / cut', null, unit(ctl.maxBoost, 'dB'), unit(ctl.maxCut, 'dB')),
-          row('Band 1 / Band 5 type', null, ctl.band1Type, ctl.band5Type),
+          row('Band 1 / 5 type', null, ctl.band1Type, ctl.band5Type),
           row('Also use Bass and Treble', 'Needs "B/T load with EQ preset" on the output', ctl.useBT))),
       h('div', { class: 'inline', style: { justifyContent: 'flex-end', marginTop: '8px' } }, resetOpts));
     const syncOpts = () => { for (const c of Object.values(ctl)) c.sync && c.sync(); };

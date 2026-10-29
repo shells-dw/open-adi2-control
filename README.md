@@ -70,13 +70,13 @@ x86-64 PCs, `arm64` for 64-bit ARM (e.g. Raspberry Pi 4/5 with a desktop).
 **Debian, Ubuntu, Mint, Pop!_OS** (Ubuntu 22.04 / Debian 12 or newer):
 
 ```sh
-sudo apt install ./open-adi2-control_0.2.1_amd64.deb
+sudo apt install ./open-adi2-control_0.2.2_amd64.deb
 ```
 
 **Fedora, openSUSE** (`.rpm`, `x86_64` / `aarch64`):
 
 ```sh
-sudo dnf install ./open-adi2-control-0.2.1-1.x86_64.rpm
+sudo dnf install ./open-adi2-control-0.2.2-1.x86_64.rpm
 ```
 
 **Arch Linux**: `packaging/aur/PKGBUILD` builds from the release tag (see
@@ -85,8 +85,8 @@ sudo dnf install ./open-adi2-control-0.2.1-1.x86_64.rpm
 **Other distributions**: the AppImage (glibc 2.35 or newer).
 
 ```sh
-chmod +x open-adi2-control_0.2.1_amd64.AppImage
-./open-adi2-control_0.2.1_amd64.AppImage
+chmod +x open-adi2-control_0.2.2_amd64.AppImage
+./open-adi2-control_0.2.2_amd64.AppImage
 ```
 
 A Flatpak manifest is in `packaging/flatpak/`; it is not on Flathub.
