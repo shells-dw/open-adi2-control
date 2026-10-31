@@ -12,7 +12,7 @@
 use crate::config::{Config, GnomeSaved};
 use crate::osd;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -20,15 +20,18 @@ use std::time::Duration;
 
 pub const ACTIONS: [&str; 3] = ["volume-up", "volume-down", "mute"];
 
+/// `$XDG_RUNTIME_DIR/open-adi2-control.sock`; without that variable a directory of the user's
+/// own under `~/.cache` (mode 700), not the shared temporary directory.
 pub fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d).join("open-adi2-control.sock"),
-        None => std::env::temp_dir().join(format!("open-adi2-control-{}.sock", uid())),
+        None => {
+            let dir = crate::config::home().join(".cache").join("open-adi2-control");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            dir.join("control.sock")
+        }
     }
-}
-
-fn uid() -> u32 {
-    std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
 }
 
 /// A program of the host system. Inside an AppImage, the variables its AppRun sets for the
@@ -81,10 +84,8 @@ pub fn ask_running(args: &[String]) -> Option<Result<String, String>> {
         Some(Ok(t.to_string()))
     } else if reply == "ok" {
         Some(Ok(String::new()))
-    } else if let Some(t) = reply.strip_prefix("err ") {
-        Some(Err(t.to_string()))
     } else {
-        None
+        reply.strip_prefix("err ").map(|t| Err(t.to_string()))
     }
 }
 

@@ -29,12 +29,12 @@ modules:
     sources:
       - type: file
         only-arches: [x86_64]
-        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.2.2/open-adi2-control_0.2.2_amd64.deb
+        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.3.2/open-adi2-control_0.3.2_amd64.deb
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
         dest-filename: package.deb
       - type: file
         only-arches: [aarch64]
-        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.2.2/open-adi2-control_0.2.2_arm64.deb
+        url: https://github.com/shells-dw/open-adi2-control/releases/download/v0.3.2/open-adi2-control_0.3.2_arm64.deb
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
         dest-filename: package.deb
       - type: file

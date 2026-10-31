@@ -51,6 +51,7 @@
           e.preventDefault && e.preventDefault();
           // module workers not supported here: fit on the main thread from now on
           workerOk = false;
+          try { worker.terminate(); } catch { /* already gone */ }
           worker = null;
           if (window.HP.log) window.HP.log('module worker unavailable, fitting on the main thread');
           resolve(runFit(meas, target, opt));
@@ -133,7 +134,17 @@
     const num = (k, attrs) => {
       const i = h('input', { type: 'number', ...attrs, 'aria-label': k });
       i.value = st.opt ? st.opt[k] : '';
-      i.addEventListener('change', () => { const v = Number(i.value); if (Number.isFinite(v)) { st.opt[k] = v; save(st); run(); } });
+      i.addEventListener('change', () => {
+        if (i.value.trim() === '') { i.sync(); return; }
+        let v = Number(i.value);
+        if (!Number.isFinite(v)) { i.sync(); return; }
+        if (attrs.min !== undefined) v = Math.max(attrs.min, v);
+        if (attrs.max !== undefined) v = Math.min(attrs.max, v);
+        st.opt[k] = v;
+        i.sync();
+        save(st);
+        run();
+      });
       i.sync = () => { i.value = st.opt[k]; };
       return i;
     };
@@ -244,7 +255,11 @@
     }
 
     async function csv(path) {
-      if (!csvCache.has(path)) csvCache.set(path, invoke('eq_file', { path }).then((t) => C.parseResponse(t)));
+      if (!csvCache.has(path)) {
+        const p = invoke('eq_file', { path }).then((t) => C.parseResponse(t));
+        p.catch(() => csvCache.delete(path));
+        csvCache.set(path, p);
+      }
       return csvCache.get(path);
     }
 
@@ -370,9 +385,12 @@
       const { L, bt } = toPresetValues(r.filters, S.schema.eqDefaults.values);
       const items = [];
       for (let i = 3; i <= 19; i++) items.push([X.key(c.eq, i), L[i]]);
-      for (let i = 21; i <= 26; i++) items.push([X.key(c.eq, i), L[i]]);
-      items.push([X.key(c.addr, S.schema.params.output.find((p) => p.id === 'dualeq').idx), 0], [X.key(c.eq, 2), 1]);
-      if (bt) items.push([X.key(c.eq, 20), 1]);
+      // Bass/Treble only when the result uses them; otherwise the output's own stay
+      if (bt) {
+        for (let i = 21; i <= 26; i++) items.push([X.key(c.eq, i), L[i]]);
+        items.push([X.key(c.eq, 20), 1]);
+      }
+      items.push([X.key(c.addr, X.SEC.output.dualeq.idx), 0], [X.key(c.eq, 2), 1]);
       for (const [k, v] of items) S.p.set(k, v);
       invoke('set', { items }).then(() => toast(`Applied to ${X.chName(c)}`)).catch((e) => toast(e, true));
     }

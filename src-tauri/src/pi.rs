@@ -81,7 +81,6 @@ fn connect(host: &str, port: u16, key: &str) -> Result<WebSocket<TcpStream>, End
                     tungstenite::HandshakeError::Failure(tungstenite::Error::Http(r)) if r.status() == 429 => Ended::Locked,
                     e => Ended::Lost(format!("WebSocket: {e}")),
                 })?;
-                ws.get_ref().set_read_timeout(Some(Duration::from_millis(50))).ok();
                 ws.get_ref().set_nodelay(true).ok();
                 return Ok(ws);
             }
@@ -105,7 +104,7 @@ fn to_device(v: &Value, label: &str, read_only: bool) -> DeviceInfo {
         connected: v["connected"].as_bool().unwrap_or(false),
         ready: v["ready"].as_bool().unwrap_or(false),
         answering: v["answering"].as_bool().unwrap_or(false),
-        id: v["id"].as_u64().map(|x| x as u8),
+        id: v["id"].as_u64().and_then(|x| u8::try_from(x).ok()),
         model: v["model"].as_str().map(Into::into),
         port: Some(label.to_string()),
         problem,
@@ -115,13 +114,13 @@ fn to_device(v: &Value, label: &str, read_only: bool) -> DeviceInfo {
 
 fn to_params(v: &Value) -> Vec<(String, i32)> {
     v.as_object()
-        .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_i64()? as i32))).collect())
+        .map(|m| m.iter().filter(|(k, _)| crate::model::valid_key(k)).filter_map(|(k, v)| Some((k.clone(), i32::try_from(v.as_i64()?).ok()?))).collect())
         .unwrap_or_default()
 }
 
 fn side(v: &Value) -> BTreeMap<u8, i32> {
     v.as_object()
-        .map(|m| m.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.as_i64()? as i32))).collect())
+        .map(|m| m.iter().filter_map(|(k, v)| Some((k.parse().ok()?, i32::try_from(v.as_i64()?).ok()?))).collect())
         .unwrap_or_default()
 }
 
@@ -275,6 +274,14 @@ fn session(mut ws: WebSocket<TcpStream>, label: &str, rx: &Receiver<In>, pipe_r:
     use std::os::unix::io::AsRawFd;
 
     out(Update::Reset);
+    // commands queued for a connection that ended are not replayed on this one; a Stop that
+    // arrived while connecting ends this session before it starts
+    while let Ok(m) = rx.try_recv() {
+        if matches!(m, In::Stop) {
+            let _ = ws.close(None);
+            return Ended::Lost("stop".into());
+        }
+    }
     let sock_fd = ws.get_ref().as_raw_fd();
     ws.get_ref().set_read_timeout(Some(Duration::from_secs(2))).ok();
     ws.get_ref().set_write_timeout(Some(Duration::from_secs(5))).ok();
@@ -303,8 +310,8 @@ fn session(mut ws: WebSocket<TcpStream>, label: &str, rx: &Receiver<In>, pipe_r:
                 while let Ok(m) = rx.try_recv() {
                     match m {
                         In::Cmd(c) => {
-                            if ws.send(Message::text(command_json(c).to_string())).is_err() {
-                                break;
+                            if let Err(e) = ws.send(Message::text(command_json(c).to_string())) {
+                                break 'session Ended::Lost(format!("send failed: {e}"));
                             }
                         }
                         In::Stop => stop = true,

@@ -11,6 +11,7 @@
 //! Left section marks a preset with separate right-channel bands.
 
 use crate::model::Preset;
+use crate::schema;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::BTreeMap;
@@ -46,19 +47,23 @@ const ENTRIES: &[(&str, u8)] = &[
     ("EQ Preset Select", 28),
 ];
 
-/// Display value → protocol integer for an EQ index.
+fn eq_param(idx: u8) -> Option<&'static serde_json::Value> {
+    schema::schema()["params"]["eq"].as_array()?.iter().find(|p| p["idx"].as_u64() == Some(idx as u64))
+}
+
+/// Display value → protocol integer for an EQ index (scale and range from schema.json).
 fn to_raw(idx: u8, v: f64) -> i32 {
-    match idx {
-        4 | 7 | 10 | 13 | 17 | 21 | 24 => (v * 2.0).round() as i32, // gain, 0.5 dB
-        6 | 9 | 12 | 15 | 19 | 23 | 26 => (v * 10.0).round() as i32, // Q, 0.1
-        _ => v.round() as i32,                                       // Hz, types, switches
+    let v = if v.is_finite() { v } else { 0.0 };
+    match eq_param(idx) {
+        Some(p) if p["type"] == "level" => schema::from_display(p, v),
+        Some(p) => (v.round() as i32).clamp(0, p["names"].as_array().map_or(1, |n| n.len() as i32 - 1)),
+        None => (v.round() as i32).clamp(0, 1),
     }
 }
 
 fn to_display(idx: u8, raw: i32) -> f64 {
-    match idx {
-        4 | 7 | 10 | 13 | 17 | 21 | 24 => raw as f64 * 0.5,
-        6 | 9 | 12 | 15 | 19 | 23 | 26 => raw as f64 * 0.1,
+    match eq_param(idx) {
+        Some(p) if p["type"] == "level" => schema::to_display(p, raw),
         _ => raw as f64,
     }
 }
@@ -75,7 +80,7 @@ pub fn write(presets: &[Preset]) -> String {
         let side = |out: &mut String, which: &str, vals: &BTreeMap<u8, i32>, left: bool| {
             out.push_str(&format!("\t<EQPreset{}{which}>\n", p.n));
             for &(e, idx) in ENTRIES {
-                if !left && (idx < 2 || idx > 19) {
+                if !left && !(2..=19).contains(&idx) {
                     continue;
                 }
                 let raw = vals.get(&idx).or_else(|| p.l.get(&idx)).copied();
@@ -115,7 +120,7 @@ pub fn read(text: &str) -> Result<Vec<Preset>, String> {
     loop {
         let ev = reader.read_event().map_err(|e| format!("not a valid preset file: {e}"))?;
         match ev {
-            Event::Start(e) => {
+            Event::Start(e) if e.name().as_ref() != b"val" => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if !seen_root {
                     seen_root = true;
@@ -123,8 +128,9 @@ pub fn read(text: &str) -> Result<Vec<Preset>, String> {
                     section = name;
                 }
             }
-            Event::End(_) => section.clear(),
-            Event::Empty(e) if e.name().as_ref() == b"val" => {
+            Event::End(e) if e.name().as_ref() != b"val" => section.clear(),
+            // `<val …/>`, or `<val …></val>` as some writers produce it
+            Event::Empty(e) | Event::Start(e) if e.name().as_ref() == b"val" => {
                 let mut en = String::new();
                 let mut v = String::new();
                 for a in e.attributes().flatten() {
@@ -194,7 +200,7 @@ pub fn read(text: &str) -> Result<Vec<Preset>, String> {
 }
 
 fn unesc(s: &str) -> String {
-    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
+    quick_xml::escape::unescape(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
 }
 
 #[cfg(test)]
@@ -202,10 +208,12 @@ mod tests {
     use super::*;
 
     fn preset(n: u8) -> Preset {
+        // the table's EQ defaults, then a few changes
+        let def = &schema::schema()["eqDefaults"]["values"];
         let mut l = BTreeMap::new();
         for i in 3..=26u8 {
             if i != 20 {
-                l.insert(i, 0);
+                l.insert(i, def[i.to_string()].as_i64().unwrap_or(0) as i32);
             }
         }
         l.insert(3, 0); // band 1 peak
@@ -278,5 +286,13 @@ mod tests {
         assert_eq!(p[0].l[&6], 7);
         assert!(!p[0].dual);
         assert!(read("hello").is_err());
+        // values outside the unit's ranges are clamped, odd numbers ignored
+        let wild = text.replace(r#"v="-2.50,""#, r#"v="999,""#).replace(r#"v="105.00,""#, r#"v="0,""#).replace(r#"v="0.70,""#, r#"v="nan,""#);
+        let w = read(&wild).unwrap();
+        assert_eq!((w[0].l[&4], w[0].l[&5], w[0].l[&6]), (24, 20, 5));
+        assert_eq!(read(&text.replace("HD 650", "HD&apos;s &#38; co")).unwrap()[0].name, "HD's & co");
+        // <val …></val> instead of <val …/>
+        let open_form = text.replace("/>", "></val>").replace(r#"<val e="Version" v="2"></val>"#, r#"<val e="Version" v="2"/>"#);
+        assert_eq!(read(&open_form).unwrap()[0].l[&5], 105);
     }
 }

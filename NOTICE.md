@@ -1,11 +1,11 @@
 # Notices
 
 - **RME ADI-2 MIDI protocol**: the SysEx protocol is RME's ("MIDI-Protocol for RME ADI-2 DAC,
-  ADI-2 Pro and ADI-2/4 Pro SE", published with ADI-2 Remote). This app implements it
-  independently; it contains no RME code.
+  ADI-2 Pro and ADI-2/4 Pro SE/EX", version 1.0 of 2026-10-29, published with ADI-2 Remote).
+  This app implements it independently; it contains no RME code.
 - **Parameter list** (`src-tauri/schema.json`): taken from ADI-2-Pi
   (https://github.com/shells-dw/adi2-pi, GPL-3.0-or-later), which compiled it from RME's MIDI
-  table, the ADI-2 manuals and tests on an ADI-2 Pro EX.
+  table, the ADI-2 manuals and tests on an ADI-2 Pro EX; checked against RME's table 1.0.
 - **EQ curve**: RBJ "Audio EQ Cookbook" (Robert Bristow-Johnson) filter formulas.
 - **Headphone EQ fitting** (`ui/hp/core.js`, `ui/hp/worker.js`): from ADI-2-Pi's headphone EQ
   (https://github.com/shells-dw/adi2-pi, GPL-3.0-or-later).

@@ -1,7 +1,7 @@
 # Open ADI-2 Control
 
-Remote control for RME ADI-2 series converters on Linux: ADI-2 DAC, ADI-2 Pro, ADI-2/4 Pro SE
-and their FS/EX versions. It talks to the unit over its USB-MIDI port, the same way RME's ADI-2
+Remote control for RME ADI-2 series converters on Linux: ADI-2 DAC, ADI-2 Pro, ADI-2/4 Pro SE,
+ADI-2/4 Pro EX and the FS/EX versions of the others. It talks to the unit over its USB-MIDI port, the same way RME's ADI-2
 Remote does on Windows, macOS and iPadOS. It can also control a unit that is connected to an
 [ADI-2-Pi](https://github.com/shells-dw/adi2-pi) on the network.
 
@@ -38,14 +38,18 @@ Not affiliated with RME. "RME" and "ADI-2" are trademarks of RME Intelligent Aud
   login**.
 - **Several units**: saved connections (USB, ADI-2-Pi bridges, Demo), one active at a time,
   switched in the top bar or the tray menu.
-- **Unit status** (Settings → Unit): device mode, balanced phones, DSD, AES/SPDIF input signal
-  (Pro models), the raw status message.
+- **Unit status** (Settings → Unit): device mode, clock and sample rate, AES/SPDIF inputs
+  (lock, sync, sample rate, 16/24 bit, emphasis, non-audio), ADAT, plugged phones, DSD,
+  warnings (over current, DC, power fail), the raw status message.
 - **Command line and D-Bus** control, **keyboard shortcuts**, dark and light theme, compact
   layout.
-- The page follows the output whose volume is turned on the unit (can be switched off).
+- The page follows the output whose volume is turned on the unit, and the phones output that
+  gets plugged in (can be switched off).
 - Only shows what the connected unit reports (an ADI-2 Pro EX sends no Phones 1/2 Mute, for
-  example). A value that RME's MIDI table doesn't list (settings added in newer models, such as
-  on the ADI-2/4 Pro EX) is shown as its number, `#n`.
+  example). A value that RME's MIDI table doesn't list is shown as its number, `#n`.
+- The ADI-2/4 Pro EX answers on the SE's device ID; the app tells them apart by the device
+  revision in the status message and uses the EX's lists (input levels down to −35 dBu, RIAA
+  0 dB, DC Filter ADC, Bal. Impedance, ADAT 3/4 source).
 
 Changes made on the unit (knob, keys, IR remote) appear in the app. The unit doesn't report
 changes sent over MIDI back, so the app reads the settings back 1.5 s after a change and
@@ -70,13 +74,13 @@ x86-64 PCs, `arm64` for 64-bit ARM (e.g. Raspberry Pi 4/5 with a desktop).
 **Debian, Ubuntu, Mint, Pop!_OS** (Ubuntu 22.04 / Debian 12 or newer):
 
 ```sh
-sudo apt install ./open-adi2-control_0.2.2_amd64.deb
+sudo apt install ./open-adi2-control_0.3.2_amd64.deb
 ```
 
 **Fedora, openSUSE** (`.rpm`, `x86_64` / `aarch64`):
 
 ```sh
-sudo dnf install ./open-adi2-control-0.2.2-1.x86_64.rpm
+sudo dnf install ./open-adi2-control-0.3.2-1.x86_64.rpm
 ```
 
 **Arch Linux**: `packaging/aur/PKGBUILD` builds from the release tag (see
@@ -85,8 +89,8 @@ sudo dnf install ./open-adi2-control-0.2.2-1.x86_64.rpm
 **Other distributions**: the AppImage (glibc 2.35 or newer).
 
 ```sh
-chmod +x open-adi2-control_0.2.2_amd64.AppImage
-./open-adi2-control_0.2.2_amd64.AppImage
+chmod +x open-adi2-control_0.3.2_amd64.AppImage
+./open-adi2-control_0.3.2_amd64.AppImage
 ```
 
 A Flatpak manifest is in `packaging/flatpak/`; it is not on Flathub.
@@ -302,7 +306,7 @@ when you change them.
 
 ## Building
 
-Needs Rust (1.77+), Node.js (for the Tauri CLI) and on Debian/Ubuntu:
+Needs Rust (1.90+), Node.js (for the Tauri CLI) and on Debian/Ubuntu:
 
 ```sh
 sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
@@ -315,7 +319,8 @@ Releases: pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`. It builds
 22.04 for amd64 and arm64 and attaches the packages and checksums to a draft release with the
 text of `RELEASE-NOTES-X.Y.Z.md`. AUR and Flatpak: `packaging/README.md`.
 
-`cargo test` in `src-tauri` runs the protocol tests, the `.adieqpr` reader/writer, settings
+`cargo test` in `src-tauri` runs the protocol tests (including RME's example messages from the
+MIDI table), the `.adieqpr` reader/writer, settings
 conversion, command-line parsing and an end-to-end test of the USB engine against the simulated
 unit. `dbus-run-session -- cargo test -- --ignored gnome` tests the GNOME key bindings (needs
 gsettings and the GNOME media-keys schema). The tests in `pi::live_tests` / `pi::view_tests`
@@ -348,10 +353,7 @@ for changes only*).
 ## Not included yet
 
 - ADI-2 Remote's setup files (`.adistp`).
-- ADI-2 Remote's full status window (per-input sync, sample rate and bit depth, output state):
-  the status message's input and output fields are only partly documented.
-- Switching the page when phones are plugged in (Pro models): the status message's active
-  output field is not confirmed for them; the page follows the knob instead.
+- The sample rate in DAC mode (status byte 17): RME's table doesn't give its value list.
 
 ## License
 

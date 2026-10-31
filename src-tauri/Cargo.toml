@@ -1,13 +1,13 @@
 [package]
 name = "open-adi2-control"
-version = "0.2.2"
+version = "0.3.2"
 description = "Remote control for RME ADI-2 series converters on Linux"
 authors = ["shells-dw"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/shells-dw/open-adi2-control"
 homepage = "https://github.com/shells-dw/open-adi2-control"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.90"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

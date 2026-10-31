@@ -76,7 +76,6 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// How this copy was installed: "appimage", "deb" or "other" (built from source …).
 /// How this copy was installed: "appimage", "flatpak", "deb", "rpm", "pacman" (AUR) or "other".
 pub fn install_kind() -> &'static str {
     use std::path::Path;

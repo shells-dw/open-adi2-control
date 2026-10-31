@@ -69,15 +69,21 @@
   }
   const has = (k) => S.p.has(k);
   const get = (k) => S.p.get(k);
-  const avail = (x) => !((x.only && !x.only.includes(model())) || (x.not && x.not.includes(model())));
+  /** Keys a model's entries are looked up under: the ADI-2/4 Pro EX uses the SE's where it has none (same device ID). */
+  const modelKeys = () => (model() === 'ex' ? ['ex', 'se'] : [model()]);
+  const named = (list) => list.some((m) => modelKeys().includes(m));
+  const avail = (x) => !((x.only && !named(x.only)) || (x.not && named(x.not)));
+  /** Basic Mode DAC on a Pro model: the output Source list differs. */
+  const dacMode = () => model() !== 'dac' && SEC.device && SEC.device.basic && get(key(12, SEC.device.basic.idx)) === 5;
   const chName = (c) => (model() === 'dac' && c.dacName ? c.dacName : c.name);
   const chShort = (c) => (model() === 'dac' ? { line: 'Line Out', ph12: 'Phones', ph34: 'IEM' }[c.key] || c.short : { in: 'Line In', line: 'Line Out' }[c.key] || c.short);
   const outputs = () => S.schema.channels.filter((c) => c.kind === 'output');
 
   /** Show a parameter: the model has it, and (once read out) the unit reports it. */
   function shows(k, p, c) {
-    if (!avail(p) || (c && !avail(c)) || (p.lineOnly && c && !c.line)) return false;
-    return S.device.ready ? has(k) : true;
+    if (!avail(p) || (c && !avail(c)) || (p.channels && c && !p.channels.includes(c.key))) return false;
+    // an action (e.g. Toggle outputs) is sent only, never reported
+    return S.device.ready && p.type !== 'action' ? has(k) : true;
   }
 
   function namesOf(p, c) {
@@ -86,8 +92,15 @@
     if (Array.isArray(n)) return n;
     if (n.line || n.phones) n = c && c.line ? n.line : n.phones;
     if (Array.isArray(n)) return n;
-    return n[model()] || n.pro || Object.values(n)[0];
+    if (n.dacmode && dacMode()) return n.dacmode;
+    for (const m of modelKeys()) if (n[m]) return n[m];
+    return n.pro || Object.values(n)[0];
   }
+  /** Protocol value of a select's first name (0; -6 for the ADI-2/4 Pro EX input levels). */
+  const baseOf = (p) => {
+    for (const m of modelKeys()) if (p.base && p.base[m] !== undefined) return p.base[m];
+    return 0;
+  };
 
   const isHz = (p) => p.unit === 'Hz';
   const disp = (p, raw) => (raw === undefined ? undefined : isHz(p) ? raw : raw * (p.scale || 1));
@@ -127,11 +140,16 @@
       if (online() && S.device.read_only) { notify([k]); askKey(); }
       return;
     }
-    S.p.set(k, v);
-    notify([k]);
+    // volumes are not shown ahead of the hub: it applies the limit and the rise speed and
+    // sends the value it set (also when the shown value stays, e.g. at the limit)
+    if (!isVolKey(k)) {
+      S.p.set(k, v);
+      notify([k]);
+    }
     pendingSets.set(k, v);
     if (!setFrame) setFrame = requestAnimationFrame(flushSets);
   }
+  const isVolKey = (k) => outputs().some((c) => key(c.addr, 12) === k);
   function flushSets() {
     setFrame = 0;
     const items = [...pendingSets.entries()];
@@ -175,7 +193,7 @@
    * Label of a select value: its name, or `#n` for a number the list doesn't have (values the
    * unit reports that are not in RME's table, e.g. on newer models). Never a neighbouring name.
    */
-  const valueLabel = (names, v) => (names && names[v] !== undefined ? names[v] : `#${v}`);
+  const valueLabel = (names, v, base = 0) => (names && names[v - base] !== undefined ? names[v - base] : `#${v}`);
 
   /**
    * Show value `v` in a select whose options don't offer it (a hidden or an unknown value):
@@ -190,12 +208,13 @@
 
   function selectKey(k, p, c, extra) {
     const names = (extra && extra.names) || namesOf(p, c) || [];
+    const base = baseOf(p);
     const hide = p.hide || [];
     const sel = h('select', { 'aria-label': p.label, disabled: p.readonly, onchange: () => setRaw(k, Number(sel.value)) },
-      names.map((n, i) => (hide.includes(i) ? null : h('option', { value: i, text: n }))));
+      names.map((n, i) => (hide.includes(i) ? null : h('option', { value: i + base, text: n }))));
     const up = () => {
       const v = get(k);
-      showValue(sel, v, valueLabel(names, v));
+      showValue(sel, v, valueLabel(names, v, base));
     };
     sub(k, up);
     up();
@@ -311,9 +330,12 @@
       vEl.replaceChildren(inp);
       inp.focus();
       inp.select();
+      let finished = false;
       const done = (ok) => {
-        if (ok) {
-          let t = inp.value.trim().replace('−', '-').replace(',', '.');
+        if (finished) return;
+        finished = true;
+        let t = inp.value.trim().replace('−', '-').replace(',', '.');
+        if (ok && t) {
           let m = 1;
           if (/k$/i.test(t)) { m = 1000; t = t.slice(0, -1); }
           const n = Number(t) * m;
@@ -339,7 +361,7 @@
       unipolar: extra.unipolar,
       def: extra.def,
       volume: extra.volume,
-      fmt: (v) => fmtVal(p, v) + (extra.unit !== undefined ? extra.unit : ''),
+      fmt: (v) => fmtVal(p, v),
       get: () => disp(p, get(k)),
       set: (v) => setRaw(k, toRaw(p, v)),
       disabled: extra.disabled,
@@ -352,9 +374,14 @@
   // ---------------------------------------------------------------- dialogs
   function dialog(title, body, actions) {
     const d = $('#dlg');
+    if (d.open) d.close(); // (its promise, if any, settles through the close event)
     d.replaceChildren(h('h3', null, title), body, h('div', { class: 'actions' }, actions));
     d.showModal();
     return d;
+  }
+  /** Resolve `fallback` when the dialog closes without a button (Escape, or replaced). */
+  function onDialogClose(d, resolve, fallback) {
+    d.addEventListener('close', () => resolve(fallback), { once: true });
   }
   function confirmDlg(title, text, okText = 'OK') {
     return new Promise((resolve) => {
@@ -362,6 +389,7 @@
         h('button', { class: 'btn', onclick: () => { d.close(); resolve(false); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: () => { d.close(); resolve(true); } }, okText),
       ]);
+      onDialogClose(d, resolve, false);
     });
   }
   /** View-only ADI-2-Pi: the key that allows changes. */
@@ -398,6 +426,7 @@
         h('button', { class: 'btn primary', onclick: () => { d.close(); resolve(inp.value.trim()); } }, okText),
       ]);
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); d.close(); resolve(inp.value.trim()); } });
+      onDialogClose(d, resolve, null);
       setTimeout(() => inp.focus(), 30);
     });
   }
@@ -551,8 +580,9 @@
       f = f < 100 ? Math.round(f) : f < 1000 ? Math.round(f / 5) * 5 : f < 5000 ? Math.round(f / 10) * 10 : Math.round(f / 100) * 100;
       const db = ((m.H / 2 - my) / (m.H / 2 - 8)) * m.DB;
       const graw = Math.round(Math.min(gp.max, Math.max(gp.min, db)) / 0.5);
+      const cut = drag.type && ['lowpass', 'highpass'].includes(EQ.kindOf(drag, src.get(side, drag.type) ?? 0));
       if (src.get(side, drag.f) !== f) src.set(side, drag.f, f);
-      if (src.get(side, drag.g) !== graw) src.set(side, drag.g, graw);
+      if (!cut && src.get(side, drag.g) !== graw) src.set(side, drag.g, graw);
       redraw();
     });
     const end = () => { drag = null; };
@@ -577,7 +607,12 @@
     const sideKey = c ? c.key : 'editor';
     const sideOf = () => (src.dual() ? S.side[sideKey] || 'L' : 'L');
     const cv = h('canvas', { class: 'curve' });
-    const redraw = () => requestAnimationFrame(() => drawCurve(cv, src, sideOf()));
+    let drawQueued = false;
+    const redraw = () => {
+      if (drawQueued) return;
+      drawQueued = true;
+      requestAnimationFrame(() => { drawQueued = false; drawCurve(cv, src, sideOf()); });
+    };
     attachCurveDrag(cv, src, sideOf, redraw);
     cv.addEventListener('themechange', redraw);
     new ResizeObserver(redraw).observe(cv);
@@ -688,7 +723,10 @@
     const panel = h('section', { class: `panel${src.live ? ' needs-unit' : ''}` }, head, h('div', { class: 'curve-wrap' }, cv),
       h('div', { class: 'eq-body' }, bands, side));
     panel.refresh = () => { updateAll(); updateSel(); };
-    if (src.live) for (const k of src.keys()) sub(k, () => { updateSel(); updateAll(); });
+    if (src.live) {
+      const onChange = () => { updateSel(); updateAll(); };
+      for (const k of src.keys()) sub(k, onChange);
+    }
     updateAll();
     return panel;
   }
@@ -767,7 +805,7 @@
 
     const left = h('div', { class: 'vol-left' },
       show('src') ? field('Source', selectKey(K('src'), O.src, c)) : null,
-      show('ref') ? field(c.line ? 'Ref Level' : 'Ref Level', h('div', { class: 'inline' }, selectKey(K('ref'), O.ref, c), show('autoref') ? swField('Auto', swKey(K('autoref'), 'Auto Ref Level')) : null)) : null);
+      show('ref') ? field('Ref Level', h('div', { class: 'inline' }, selectKey(K('ref'), O.ref, c), show('autoref') ? swField('Auto', swKey(K('autoref'), 'Auto Ref Level')) : null)) : null);
     const right = h('div', { class: 'vol-right' }, h('div', { class: 'btn-grid' },
       recallBtn,
       show('lockvol') ? btnKey(K('lockvol'), 'Lock', 'amber') : h('span'),
@@ -819,7 +857,8 @@
     const gen = h('section', { class: 'panel needs-unit' }, h('h2', null, 'Line input'),
       h('div', { class: 'fields' },
         sel('adconv', 'Conversion'),
-        show('inref') ? field('Ref Level', h('div', { class: 'inline' }, selectKey(K('inref'), I.inref, c), show('inautoref') ? swField('Auto', swKey(K('inautoref'), 'Auto')) : null)) : null));
+        show('inref') ? field('Ref Level', h('div', { class: 'inline' }, selectKey(K('inref'), I.inref, c), show('inautoref') ? swField('Auto', swKey(K('inautoref'), 'Auto')) : null)) : null,
+        sel('balimp')));
     const adv = h('section', { class: 'panel needs-unit' }, h('h2', null, 'Advanced settings'),
       h('div', { class: 'inline', style: { alignItems: 'flex-start', gap: '18px' } },
         show('trimL') ? knobKey(K('trimL'), I.trimL, { label: 'Trim L', def: 0 }) : null,
@@ -838,8 +877,13 @@
     if (p.type === 'toggle') ctl = swKey(k, p.label);
     else if (p.type === 'select' && p.readonly) {
       ctl = h('div', { class: 'num' });
-      const up = () => { const v = get(k); ctl.textContent = v === undefined ? '–' : valueLabel(namesOf(p), v); };
+      const up = () => { const v = get(k); ctl.textContent = v === undefined ? '–' : valueLabel(namesOf(p), v, baseOf(p)); };
       sub(k, up); up();
+    } else if (p.type === 'action') {
+      ctl = h('button', { class: 'btn', onclick: () => {
+        if (!guard()) return;
+        invoke('set', { items: [[k, 0]] }).then(() => toast(p.label)).catch((e) => toast(e, true));
+      } }, p.label);
     } else if (p.type === 'select') {
       ctl = selectKey(k, p);
       ctl.style.width = '190px';
@@ -942,25 +986,28 @@
       for (const [k, v] of items) S.p.set(k, v);
       return invoke('set', { items });
     };
-    const listenBtn = h('button', { class: 'btn', title: 'Send this EQ to the chosen output (its Manual EQ); nothing is stored. A/B then switches between the output\'s previous EQ and this one.', onclick: () => {
+    const listenBtn = h('button', { class: 'btn needs-unit', title: 'Send this EQ to the chosen output (its Manual EQ); nothing is stored. A/B then switches between the output\'s previous EQ and this one.', onclick: () => {
       const c = CH[target.value];
       if (!c || !guard()) return;
       const after = editorItems(c);
-      // what the output had, for A/B
+      // what the output had, for A: the same keys plus its preset selection (a preset is
+      // restored by selecting it again; Temp (1) can't be selected and is left out)
       if (!S.ab || S.ab.ch !== c.key) {
         const before = [];
         for (const [k] of after) if (has(k)) before.push([k, get(k)]);
-        S.ab = { ch: c.key, before, after, on: 'B' };
+        const presetKey = key(c.eq, 28);
+        if (has(presetKey) && get(presetKey) !== 1) before.push([presetKey, get(presetKey)]);
+        S.ab = { ch: c.key, before, on: 'B' };
       } else {
-        S.ab.after = after;
         S.ab.on = 'B';
       }
       sendItems(after).then(() => { toast(`Listening on ${chName(c)}`); drawAb(); }).catch((e) => toast(e, true));
     } }, 'Listen');
-    const abBox = h('div', { class: 'seg', title: 'A: the EQ the output had before Listen · B: this preset' },
+    const abBox = h('div', { class: 'seg needs-unit', title: 'A: the EQ the output had before Listen · B: this preset as it is now' },
       ['A', 'B'].map((which) => h('button', { value: which, onclick: () => {
-        if (!S.ab || S.ab.ch !== target.value || !guard()) return;
-        const items = which === 'A' ? S.ab.before : S.ab.after;
+        const c = CH[target.value];
+        if (!S.ab || !c || S.ab.ch !== c.key || !guard()) return;
+        const items = which === 'A' ? S.ab.before : editorItems(c);
         S.ab.on = which;
         sendItems(items).then(drawAb).catch((e) => toast(e, true));
       } }, which)));
@@ -979,7 +1026,7 @@
         S.editor = { ...JSON.parse(JSON.stringify(S.clip)), n, base };
         drawAll();
       } }, 'Paste'),
-      h('button', { class: 'btn', title: 'Flat: all bands 0 dB', onclick: () => {
+      h('button', { class: 'btn', title: 'Back to the unit\'s default EQ: all gains 0 dB, default frequencies, Q and band types', onclick: () => {
         const def = S.schema.eqDefaults.values;
         for (let i = 3; i <= 26; i++) if (i !== 20) S.editor.L[i] = def[i];
         for (let i = 3; i <= 19; i++) S.editor.R[i] = def[i];
@@ -1085,7 +1132,7 @@
   function saveProfiles(profiles, profile = S.config.volume.profile) {
     return saveConfig({ volume: { profiles, profile } });
   }
-  const NEW_UNIT = { name: '', mode: 'usb', pi_address: '', pi_key: '', demo_model: 'pro' };
+  const NEW_UNIT = { name: '', mode: 'usb', pi_address: '', pi_key: '', demo_model: 'se' };
 
   function opt(label, small, ctl) {
     return h('div', { class: 'opt' }, h('div', { class: 'lab' }, label, small ? h('small', null, small) : null), ctl);
@@ -1161,12 +1208,12 @@
     } }, 'Find');
     const radio = (v, label, small, ...extra) => h('label', null,
       h('input', { type: 'radio', name: 'mode', value: v, checked: mode === v, onchange: () => {
-        if (v === 'pi' && !addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); return; }
+        if (v === 'pi' && !addr.value.trim()) { toast('Enter the ADI-2-Pi address, or press Find'); drawPage(); return; }
         saveUnit({ mode: v, pi_address: addr.value.trim(), pi_key: keyIn.value.trim() });
       } }),
       h('div', null, h('div', null, label), small ? h('div', { class: 'hint', style: { margin: 0 } }, small) : null, extra));
     const demoModel = h('select', { 'aria-label': 'Demo model', onchange: () => saveUnit({ demo_model: demoModel.value }) },
-      [['se', 'ADI-2/4 Pro SE / Pro EX'], ['pro', 'ADI-2 Pro / Pro EX'], ['dac', 'ADI-2 DAC']].map(([v, t]) => h('option', { value: v, text: t })));
+      [['ex', 'ADI-2/4 Pro EX'], ['se', 'ADI-2/4 Pro SE'], ['pro', 'ADI-2 Pro / Pro EX'], ['dac', 'ADI-2 DAC']].map(([v, t]) => h('option', { value: v, text: t })));
     demoModel.value = u.demo_model || 'pro';
     const piLink = h('a', { href: '#', title: 'github.com/shells-dw/adi2-pi', onclick: (e) => { e.preventDefault(); invoke('open_adi2_pi_page').catch((err) => toast(err, true)); } }, 'ADI-2-Pi');
     const conn = h('section', { class: 'panel' }, h('h2', null, 'Connection'),
@@ -1184,17 +1231,21 @@
     // volume
     const outs = outputs().filter((c) => !S.device.model || shows(key(c.addr, 12), SEC.output.vol, c));
     const numIn = (val, onch, attrs) => { const i = h('input', { type: 'number', step: 0.5, value: val ?? '', placeholder: 'none', ...attrs }); i.addEventListener('change', () => onch(i.value === '' ? null : Number(i.value))); return i; };
+    // (profiles and the active index are read from the settings at the time of each change:
+    // a tray switch or an earlier edit may have changed them since the page was drawn)
+    const live = () => ({ profiles: S.config.volume.profiles, pIdx: S.config.volume.profile });
     const profiles = cfg.volume.profiles;
     const pIdx = cfg.volume.profile;
     const prof = profiles[pIdx] || profiles[0];
-    const profSel = h('select', { 'aria-label': 'Volume limit profile', onchange: () => saveProfiles(profiles, Number(profSel.value)).then(drawPage) },
+    const profSel = h('select', { 'aria-label': 'Volume limit profile', onchange: () => saveProfiles(live().profiles, Number(profSel.value)).then(drawPage) },
       profiles.map((p, i) => h('option', { value: i, text: p.name })));
     profSel.value = String(pIdx);
+    pageSubs.add(() => { profSel.value = String(S.config.volume.profile); });
     const profName = h('input', { type: 'text', value: prof.name, maxlength: 24, style: { width: '140px' }, 'aria-label': 'Profile name' });
-    profName.addEventListener('change', () => saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, name: profName.value.trim() || p.name } : p))).then(drawPage));
-    const addProf = h('button', { class: 'btn', title: 'Another set of limits; switch between them in the tray menu', onclick: () => saveProfiles([...profiles, { name: `Profile ${profiles.length + 1}`, limit: { ...prof.limit } }], profiles.length).then(drawPage) }, 'Add');
-    const rmProf = h('button', { class: 'btn', disabled: profiles.length < 2, onclick: () => saveProfiles(profiles.filter((_, i) => i !== pIdx), 0).then(drawPage) }, 'Remove');
-    const setLimit = (ch, v) => saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, limit: { ...p.limit, [ch]: v } } : p)));
+    profName.addEventListener('change', () => { const { profiles, pIdx } = live(); saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, name: profName.value.trim() || p.name } : p))).then(drawPage); });
+    const addProf = h('button', { class: 'btn', title: 'Another set of limits; switch between them in the tray menu', onclick: () => { const { profiles, pIdx } = live(); saveProfiles([...profiles, { name: `Profile ${profiles.length + 1}`, limit: { ...(profiles[pIdx] || {}).limit } }], profiles.length).then(drawPage); } }, 'Add');
+    const rmProf = h('button', { class: 'btn', disabled: profiles.length < 2, onclick: () => { const { profiles, pIdx } = live(); saveProfiles(profiles.filter((_, i) => i !== pIdx), 0).then(drawPage); } }, 'Remove');
+    const setLimit = (ch, v) => { const { profiles, pIdx } = live(); return saveProfiles(profiles.map((p, i) => (i === pIdx ? { ...p, limit: { ...p.limit, [ch]: v } } : p))); };
     const volRows = outs.map((c) => h('tr', null,
       h('td', null, chName(c)),
       h('td', null, numIn(prof.limit[c.key], (v) => setLimit(c.key, v), { min: -114.5, max: 6, 'aria-label': `${chName(c)} limit` }), ' dB'),
@@ -1260,31 +1311,45 @@
       const st = S.status;
       const d = S.device;
       const row = (k, v) => h('tr', null, h('td', null, k), h('td', null, v));
-      const yes = (b) => (b ? 'yes' : 'no');
-      const pro = d.model === 'pro' || d.model === 'se';
+      const list = (items) => items.filter(Boolean).join(', ') || '–';
+      const pro = d.model && d.model !== 'dac';
       const modeNames = (SEC.device.basic && namesOf(SEC.device.basic)) || [];
-      const outName = { 0: 'Line Out', 1: chShort(CH.ph12), 2: chShort(CH.ph34) };
-      statusTable.replaceChildren(
+      // sample rate codes of the AES/SPDIF inputs and the internal rate (RME table, IOStatus 1)
+      const RATES = ['32 kHz', '44.1 kHz', '48 kHz', null, '64 kHz', '88.2 kHz', '96 kHz', null, '128 kHz', '176.4 kHz', '192 kHz'];
+      const rate = (n) => RATES[n] ?? (n === 15 ? 'none' : `#${n}`);
+      const input = (lock, sync, r, bits24, prof, emph, nonAudio) => (!lock ? 'no signal'
+        : list([sync ? 'locked, in sync' : 'locked, not in sync', rate(r), bits24 ? '24 bit' : '16 bit', prof ? 'professional' : null, emph ? 'emphasis' : null, nonAudio ? 'non-audio' : null]));
+      const rows = [
         row('Model', d.model ? S.schema.modelNames[d.model] : '–'),
         row('Device ID', d.id ? `0x${d.id.toString(16)}` : '–'),
         row('Connected through', d.port || '–'),
         unit().mode === 'pi' ? row('Access', d.connected ? (d.read_only ? 'view only (no key)' : 'full') : '–') : null,
-        row('Device mode', st ? `${valueLabel(modeNames, st.mode)} (${st.mode})` : '–'),
-        row('Balanced phones', st ? yes(st.balanced) : '–'),
-        row('DSD decode', st ? String(st.dsd) : '–'),
-        row('Active output', st ? `${st.active_out}${outName[st.active_out] ? ` · ${outName[st.active_out]}?` : ''}` : '–'),
-        row('Active line', st ? String(st.active_line) : '–'),
-        pro ? row('AES input signal', st ? yes(st.aes_in) : '–') : null,
-        pro ? row('SPDIF input signal', st ? yes(st.spdif_in) : '–') : null,
-        row('Revision / protocol', st ? `${st.revision} / ${st.protocol}` : '–'),
-        row('IOStatus 1 / 2', st ? h('code', null, `${st.io1.toString(16).padStart(7, '0')} ${st.io2.toString(16).padStart(7, '0')}`) : '–'),
-        row('Status message', h('code', null, st ? st.hex : '–')));
+      ];
+      if (st) {
+        const dsd = list([st.dsd_usb && 'USB', st.dsd_line && 'Line', st.dsd_phones && 'Phones', st.dsd_digital_out && 'digital outputs', st.dsd_aes && 'AES', st.dsd_spdif && 'SPDIF']);
+        const warn = list([st.ph1_overcurrent && 'over current phones 1', st.ph2_overcurrent && 'over current phones 2', st.ph1_dc_error && 'DC error phones 1',
+          st.ph2_dc_error && 'DC error phones 2', st.high_load && 'high load', st.dc_line && 'DC on line', st.dc_phones && 'DC on phones', st.power_fail && 'power fail']);
+        rows.push(
+          row('Device mode', valueLabel(modeNames, st.mode)),
+          row('Clock', `${['internal', 'AES', 'SPDIF', 'internal'][st.clock]}, ${rate(st.int_rate)}`),
+          pro ? row('AES input', input(st.aes_lock, st.aes_sync, st.aes_rate, st.aes_24bit, st.aes_professional, st.aes_emphasis, st.aes_non_audio)) : null,
+          row(`SPDIF input (${st.spdif_optical ? 'optical' : 'coax'})`, input(st.spdif_lock, st.spdif_sync, st.spdif_rate, st.spdif_24bit, st.spdif_professional, st.spdif_emphasis, st.spdif_non_audio)),
+          pro ? row('ADAT', st.adat ? 'detected' : '–') : null,
+          row('Phones plugged', list([st.ph1_plug && chShort(CH.ph12), st.ph2_plug && chShort(CH.ph34), st.penta && '4.4 mm'])),
+          row('Balanced phones', st.balanced ? 'on' : 'off'),
+          row('DSD', dsd),
+          st.bit_test ? row('Bit test', `passed (${st.bit_test})`) : null,
+          row('Warnings', warn),
+          row('Revision / protocol', `${st.revision} / ${st.protocol}${st.eight_channel ? ' · 8-channel mode' : ''}`),
+          row('Status message', h('code', null, st.hex)));
+      } else rows.push(row('Status message', '–'));
+      statusTable.replaceChildren(...rows.filter(Boolean));
     };
     drawStatus();
     pageSubs.add(drawStatus);
     const status = h('section', { class: 'panel' }, h('h2', null, 'Unit'),
       statusTable,
-      h('p', { class: 'hint' }, 'Fields after "Device mode" are read from the unit\'s status message; "Active output" and the IOStatus words are only partly documented.'),
+      h('p', { class: 'hint' }, 'Fields after "Access" come from the unit\'s status message (about once a second).'),
       h('div', { class: 'inline', style: { marginTop: '8px' } }, h('button', { class: 'btn', onclick: () => invoke('refresh').then(() => toast('Reading all settings again')).catch((e) => toast(e, true)) }, 'Read everything again')));
 
     return h('div', { class: 'page' }, h('div', { class: 'row2' }, conn, keys), h('div', { class: 'row2' }, vol, popup), h('div', { class: 'row2' }, app, status));
@@ -1394,7 +1459,8 @@
   }
 
   // ---------------------------------------------------------------- theme, shortcuts, follow
-  const unitLabel = (x, i) => x.name || ({ usb: 'USB', pi: x.pi_address || 'ADI-2-Pi', demo: 'Demo' }[x.mode] || `Connection ${i + 1}`);
+  /** Same text as the tray menu (Rust `Connection::label`). */
+  const unitLabel = (x) => x.name.trim() || ({ usb: 'USB', pi: `ADI-2-Pi ${x.pi_address}`, demo: 'Demo' }[x.mode] || 'USB');
 
   const systemLight = window.matchMedia('(prefers-color-scheme: light)');
   function applyTheme() {
@@ -1429,7 +1495,6 @@
   function showShortcuts() {
     const d = dialog('Keyboard shortcuts', h('table', { class: 'tbl' }, SHORTCUTS.map(([k, t]) => h('tr', null, h('td', null, h('code', null, k)), h('td', null, t)))),
       [h('button', { class: 'btn', onclick: () => d.close() }, 'Close')]);
-    d.querySelector('p') && d.querySelector('p').remove();
   }
 
   function onKey(e) {
@@ -1452,15 +1517,15 @@
       const v = get(k);
       if (v !== undefined) setRaw(k, v + dir * Math.round(db * 10));
     };
-    const tog = (k) => { if (c && has(k)) setRaw(k, get(k) ? 0 : 1); };
+    const tog = (keyOf) => { if (!c) return; const k = keyOf(c); if (has(k)) setRaw(k, get(k) ? 0 : 1); };
     switch (e.key) {
       case 'ArrowUp': vol(1, S.config.volume.step || 1); break;
       case 'ArrowDown': vol(-1, S.config.volume.step || 1); break;
       case 'PageUp': vol(1, 5); break;
       case 'PageDown': vol(-1, 5); break;
-      case 'm': case 'M': tog(key(c.addr, 15)); break;
-      case 'd': case 'D': tog(key(c.addr, 16)); break;
-      case 'e': case 'E': tog(key(c.eq, 2)); break;
+      case 'm': case 'M': tog((o) => key(o.addr, 15)); break;
+      case 'd': case 'D': tog((o) => key(o.addr, 16)); break;
+      case 'e': case 'E': tog((o) => key(o.eq, 2)); break;
       default:
         if (/^[1-9]$/.test(e.key) && S.setups.length) { confirmSetup(Number(e.key)); break; }
         return;
@@ -1526,7 +1591,7 @@
   }
 
   /** What the headphone EQ tab (hp.js) needs from here. */
-  const ctx = () => ({ h, s, S, invoke, toast, dialog, confirmDlg, field, opt, knob, fmtHz, importPresets, model, chName, outputs, go, cssColor, usable, guard, get, has, key, SEC, CH });
+  const ctx = () => ({ h, S, invoke, toast, confirmDlg, fmtHz, importPresets, chName, outputs, go, cssColor, guard, has, key, SEC, CH });
 
   function renderConn() {
     const el = $('#conn');
@@ -1591,8 +1656,11 @@
         // a parameter the page didn't know when it was drawn (the unit reported it after
         // "ready"): draw the page again so its control appears
         const fresh = S.device.ready && ks.some((k) => !S.p.has(k));
+        // Basic Mode in or out of DAC: the Source list changes
+        const basicKey = SEC.device.basic && key(12, SEC.device.basic.idx);
+        const modeChange = basicKey && ks.includes(basicKey) && (S.p.get(basicKey) === 5) !== (u.p[basicKey] === 5);
         for (const k of ks) S.p.set(k, u.p[k]);
-        if (fresh) scheduleRedraw();
+        if (fresh || modeChange) scheduleRedraw();
         if (u.origin === 'device' && S.device.ready) {
           for (const c of outputs()) if (u.p[key(c.addr, 12)] !== undefined) S.lastOut = c.key;
         }
@@ -1618,6 +1686,9 @@
         S.status = u.status;
         // ADI-2 DAC: byte 6 bits 1–0 name the active output (0 Line, 1 Phones, 2 IEM assumed)
         if (prev && u.status && prev.active_out !== u.status.active_out && S.device.model === 'dac') followOutput(['line', 'ph12', 'ph34'][u.status.active_out]);
+        // phones plugged in (IOStatus 1 bits 21 / 27)
+        if (prev && u.status && !prev.ph1_plug && u.status.ph1_plug) followOutput('ph12');
+        if (prev && u.status && !prev.ph2_plug && u.status.ph2_plug) followOutput('ph34');
         if (S.page === 'settings') for (const fn of pageSubs) fn();
         break;
       }
@@ -1627,10 +1698,11 @@
         if (S.page === 'settings') for (const fn of pageSubs) fn();
         break;
       case 'config': {
-        const before = S.config && JSON.stringify([unit(), S.config.units.length]);
+        const target = (x) => [x.mode, x.pi_address, x.pi_key, x.demo_model];
+        const before = S.config && JSON.stringify([target(unit()), S.config.units.length]);
         S.config = u.config;
         applyTheme();
-        const unitChanged = before !== JSON.stringify([unit(), S.config.units.length]);
+        const unitChanged = before !== JSON.stringify([target(unit()), S.config.units.length]);
         if (unitChanged) { S.editor = null; S.ab = null; renderConn(); drawPage(); } else for (const fn of pageSubs) fn();
         break;
       }

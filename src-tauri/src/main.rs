@@ -76,8 +76,8 @@ fn osd_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
 // ---------------------------------------------------------------- autostart
 
 fn autostart_file() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(Into::into).unwrap_or_else(|| config::home().join(".config"));
-    std::path::PathBuf::from(base).join("autostart").join("open-adi2-control.desktop")
+    let base: std::path::PathBuf = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(Into::into).unwrap_or_else(|| config::home().join(".config"));
+    base.join("autostart").join("open-adi2-control.desktop")
 }
 
 fn set_autostart(on: bool) -> Result<(), String> {
@@ -141,8 +141,16 @@ fn refresh(hub: tauri::State<Arc<Hub>>) -> Res<()> {
     hub.command(Command::Refresh)
 }
 
+/// Settings change from the window. The GNOME key-binding and autostart steps run external
+/// programs, so the command is async and the work runs off the main thread; the tray icon is
+/// created or removed on the main thread.
 #[tauri::command]
-fn set_config(app: AppHandle, hub: tauri::State<Arc<Hub>>, patch: Value) -> Res<Config> {
+async fn set_config(app: AppHandle, hub: tauri::State<'_, Arc<Hub>>, patch: Value) -> Res<Config> {
+    let hub = hub.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || apply_config(app, hub, patch)).await.map_err(|e| e.to_string())?
+}
+
+fn apply_config(app: AppHandle, hub: Arc<Hub>, patch: Value) -> Res<Config> {
     let old = hub.config();
     let mut new = old.patched(&patch)?;
     let mut problems: Vec<String> = Vec::new();
@@ -162,23 +170,37 @@ fn set_config(app: AppHandle, hub: tauri::State<Arc<Hub>>, patch: Value) -> Res<
             new.autostart = old.autostart;
         }
     }
-    *hub.cfg.lock().unwrap() = new.clone();
+    // settings changed meanwhile (tray menu, while gsettings ran) are kept: the patch goes onto
+    // the current settings, with the results of the steps above; `before` is what they replace
+    let (before, new) = {
+        let mut cur = hub.cfg.lock().unwrap();
+        let before = cur.clone();
+        let mut merged = cur.patched(&patch)?;
+        merged.keys.enabled = new.keys.enabled;
+        merged.autostart = new.autostart;
+        merged.gnome_saved = new.gnome_saved.clone();
+        *cur = merged.clone();
+        (before, merged)
+    };
     new.save();
-    if new.tray != old.tray {
-        if new.tray {
-            let _ = tray::create(&app);
-        } else {
-            tray::remove(&app);
-        }
+    if new.tray != before.tray {
+        let (a, on) = (app.clone(), new.tray);
+        let _ = app.run_on_main_thread(move || {
+            if on {
+                let _ = tray::create(&a);
+            } else {
+                tray::remove(&a);
+            }
+        });
     }
-    if new.unit() != old.unit() {
-        hub.inner().connect();
+    if !new.unit().same_target(before.unit()) {
+        hub.connect();
     }
-    if new.volume.profile != old.volume.profile || new.volume.profiles != old.volume.profiles {
-        hub.inner().apply_limits();
+    if new.volume.profile != before.volume.profile || new.volume.profiles != before.volume.profiles {
+        hub.apply_limits();
     }
-    if new.updates.check && !old.updates.check {
-        let h = hub.inner().clone();
+    if new.updates.check && !before.updates.check {
+        let h = hub.clone();
         std::thread::spawn(move || h.check_updates(false));
     }
     tray::refresh(&app);
@@ -367,7 +389,11 @@ fn main() {
     }
     if matches!(args.first().map(String::as_str), Some("get" | "set" | "setup" | "preset" | "refresh" | "ping")) {
         match keys::ask_running(&args) {
-            Some(Ok(t)) => println!("{t}"),
+            Some(Ok(t)) => {
+                // (stdout may be a pipe closed early, e.g. `| head`)
+                use std::io::Write;
+                let _ = writeln!(std::io::stdout(), "{t}");
+            }
             Some(Err(t)) => {
                 eprintln!("{t}");
                 std::process::exit(1);
@@ -385,7 +411,7 @@ fn main() {
             "       open-adi2-control volume-up | volume-down | mute\n",
             "       open-adi2-control get [line|ph12|ph34|in|device [id [R]]]\n",
             "       open-adi2-control set <line|ph12|ph34|in|device> <id> <value> [R]\n",
-            "           value: a number (+1 / -=1 relative), on/off/toggle, a choice by name or index, next/prev\n",
+            "           value: a number (+1 / -=1 relative), on/off/toggle, a choice by name, #n or its number, next/prev\n",
             "       open-adi2-control setup <1-9> | preset <output> <1-20|manual|temp> | refresh\n",
             "       ids: see src-tauri/schema.json (vol, mute, dim, src, eqen, eqpreset, b1g …)"
         ));

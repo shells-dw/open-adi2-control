@@ -24,7 +24,7 @@ pub struct DeviceInfo {
     /// the unit sends its status messages (MIDI Control on)
     pub answering: bool,
     pub id: Option<u8>,
-    /// "dac" | "pro" | "se"
+    /// "dac" | "pro" | "se" | "ex" (ADI-2/4 Pro EX: device ID of the SE, device revision 1)
     pub model: Option<String>,
     /// port or bridge the unit is reached through
     pub port: Option<String>,
@@ -93,4 +93,14 @@ pub fn key(addr: u8, idx: u8) -> String {
 pub fn split_key(k: &str) -> Option<(u8, u8)> {
     let (a, i) = k.split_once('.')?;
     Some((a.parse().ok()?, i.parse().ok()?))
+}
+
+/// A key that can be sent: address 0–12 (13/14 are preset data), index within the container
+/// (5 bits on channels, 6 bits on the device address).
+pub fn valid_key(k: &str) -> bool {
+    match split_key(k) {
+        Some((12, i)) => i < 64,
+        Some((a, i)) => a < 12 && i < 32,
+        None => false,
+    }
 }

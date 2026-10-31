@@ -1,7 +1,7 @@
 {
  "api": 1,
  "schema": "1",
- "about": "ADI-2 parameters for the ADI-2-Pi API. Sources: RME MIDI table v0.2, ADI-2 Pro EX manual v4.0, ADI-2 Remote manual v2.2, and parameters reported by an ADI-2 Pro EX. Values are integers as the unit uses them; display value = value * scale. EQ frequencies are plain Hz. 'names' lists the value names, index = value.",
+ "about": "ADI-2 parameters. Sources: RME MIDI table 1.0, ADI-2 Pro EX manual v4.0, ADI-2 Remote manual v2.2, and parameters reported by an ADI-2 Pro EX. Values are integers as the unit uses them; display value = value * scale. EQ frequencies are plain Hz. 'names' lists the value names, index = value - 'base' (0 unless given).",
  "models": {
   "113": "dac",
   "114": "pro",
@@ -10,7 +10,8 @@
  "modelNames": {
   "dac": "ADI-2 DAC",
   "pro": "ADI-2 Pro / Pro EX",
-  "se": "ADI-2/4 Pro SE / Pro EX"
+  "se": "ADI-2/4 Pro SE",
+  "ex": "ADI-2/4 Pro EX"
  },
  "setups": 9,
  "eqDefaults": {
@@ -99,7 +100,8 @@
   "dsd": "DSD",
   "display": "Display and keys",
   "power": "Power",
-  "setups": "Setups"
+  "setups": "Setups",
+  "status": "Status"
  },
  "params": {
   "output": [
@@ -191,8 +193,27 @@
       "USB",
       "USB (Rec coax)",
       "USB (Rec opt.)"
+     ],
+     "ex": [
+      "Auto",
+      "AES",
+      "SPDIF",
+      "Analog",
+      "USB 1/2",
+      "USB 3/4",
+      "ADAT 3/4"
+     ],
+     "dacmode": [
+      "Auto",
+      "AES",
+      "SPDIF coax",
+      "Optical",
+      "Analog",
+      "USB 1/2",
+      "USB 3/4"
      ]
-    }
+    },
+    "note": "\"dacmode\": ADI-2 Pro and ADI-2/4 with Basic Mode DAC"
    },
    {
     "id": "ref",
@@ -324,7 +345,8 @@
       "Sharp",
       "Slow",
       "NOS",
-      "SD LD"
+      "SD LD",
+      "Brickwall"
      ]
     }
    },
@@ -400,11 +422,14 @@
     "only": [
      "se"
     ],
-    "lineOnly": true,
     "names": [
      "Line 1/2",
      "Ph. 3/4"
-    ]
+    ],
+    "channels": [
+     "ph34"
+    ],
+    "note": "Rear TRS outputs carry Line 1/2 or Phones 3/4"
    },
    {
     "id": "dualeq",
@@ -452,7 +477,7 @@
     "idx": 23,
     "type": "level",
     "group": "loudness",
-    "scale": 0.1,
+    "scale": 0.5,
     "min": -90,
     "max": -20,
     "step": 0.5,
@@ -480,8 +505,25 @@
       "+13 dBu",
       "+19 dBu",
       "+24 dBu"
+     ],
+     "ex": [
+      "-35 dBu",
+      "-29 dBu",
+      "-23 dBu",
+      "-17 dBu",
+      "-11 dBu",
+      "-5 dBu",
+      "+1 dBu",
+      "+7 dBu",
+      "+13 dBu",
+      "+19 dBu",
+      "+24 dBu"
      ]
-    }
+    },
+    "base": {
+     "ex": -6
+    },
+    "note": "ADI-2/4 Pro EX: below +1 dBu as digital gain; MIDI values -6 … 4"
    },
    {
     "id": "inautoref",
@@ -576,6 +618,11 @@
      "se": [
       "RME",
       "None"
+     ],
+     "ex": [
+      "ADC",
+      "RME",
+      "None"
      ]
     }
    },
@@ -588,14 +635,25 @@
     "only": [
      "se"
     ],
-    "names": [
-     "OFF",
-     "+14 dB",
-     "+20 dB",
-     "+26 dB",
-     "+32 dB",
-     "+38 dB"
-    ]
+    "names": {
+     "se": [
+      "OFF",
+      "+14 dB",
+      "+20 dB",
+      "+26 dB",
+      "+32 dB",
+      "+38 dB"
+     ],
+     "ex": [
+      "OFF",
+      "0 dB",
+      "+14 dB",
+      "+20 dB",
+      "+26 dB",
+      "+32 dB",
+      "+38 dB"
+     ]
+    }
    },
    {
     "id": "riaamono",
@@ -613,6 +671,20 @@
     "idx": 8,
     "type": "toggle",
     "group": "peq"
+   },
+   {
+    "id": "balimp",
+    "label": "Bal. Impedance",
+    "idx": 13,
+    "type": "select",
+    "group": "input",
+    "only": [
+     "ex"
+    ],
+    "names": [
+     "94 kΩ",
+     "47 kΩ"
+    ]
    }
   ],
   "eq": [
@@ -1250,6 +1322,30 @@
     ]
    },
    {
+    "id": "mutelinevs",
+    "label": "Mute Line",
+    "idx": 1,
+    "type": "select",
+    "group": "phones",
+    "only": [
+     "dac"
+    ],
+    "names": [
+     "OFF",
+     "vs. Phones",
+     "Toggle Ph/Line",
+     "Toggle plugged"
+    ]
+   },
+   {
+    "id": "toggleout",
+    "label": "Toggle outputs",
+    "idx": 63,
+    "type": "action",
+    "group": "phones",
+    "note": "Same as the unit's toggle function (Toggle Phones/Line)"
+   },
+   {
     "id": "dsddet",
     "label": "DSD Detection",
     "idx": 3,
@@ -1489,7 +1585,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -1671,7 +1770,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -1853,7 +1955,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -2035,7 +2140,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -2217,7 +2325,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -2403,7 +2514,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -2589,7 +2703,10 @@
       "EQ Preset 6",
       "EQ Preset 7",
       "EQ Preset 8",
-      "EQ Preset 9"
+      "EQ Preset 9",
+      "RIAA Mode +",
+      "RIAA Mode −",
+      "RIAA Mono B."
      ],
      "dac": [
       "Default",
@@ -2666,8 +2783,9 @@
      "with Setup"
     ],
     "note": "with Setup: loading a setup also sets the volume stored in it",
-    "source": "not in RME's MIDI table v0.2; reported by the ADI-2 Pro EX: 0 = disabled, 1 = with Setup"
+    "source": "RME MIDI table 1.0 (device index 62)"
    }
   ]
- }
+ },
+ "modelNote": "\"ex\" (ADI-2/4 Pro EX) shares the SE's device ID 0x73; the status message's device revision 1 tells it apart. Lists without an \"ex\" entry use the \"se\" one; \"only\"/\"not\" lists naming \"se\" include the EX."
 }

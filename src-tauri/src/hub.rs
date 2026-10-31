@@ -24,6 +24,16 @@ pub struct Model {
     pub setups: Vec<String>,
     pub presets: Vec<Preset>,
     pub status: Option<Status>,
+    /// device revision from the status message (tells the ADI-2/4 Pro EX from the SE)
+    pub revision: Option<u8>,
+}
+
+/// The model as shown and used for value names: device ID 0x73 with revision 1 is "ex".
+fn with_revision(mut d: DeviceInfo, revision: Option<u8>) -> DeviceInfo {
+    if let (Some(m), Some(r)) = (d.model.as_deref(), revision) {
+        d.model = Some(schema::model_with_revision(m, r).to_string());
+    }
+    d
 }
 
 pub struct Hub {
@@ -141,8 +151,27 @@ impl Hub {
         // a preset stored without a name is named after its slot
         let c = match c {
             Command::StorePreset { n, name, l, r, dual } => {
+                if !(1..=20).contains(&n) {
+                    return Err(format!("no EQ preset {n}"));
+                }
                 let name = name.filter(|s| !s.trim().is_empty()).or_else(|| Some(format!("Preset {n}")));
                 Command::StorePreset { n, name, l, r, dual }
+            }
+            Command::RenamePreset(n, _) if !(1..=20).contains(&n) => return Err(format!("no EQ preset {n}")),
+            Command::RenamePreset(n, _) if self.model.lock().unwrap().presets.get(n as usize - 1).is_none_or(|p| p.empty != Some(false)) => {
+                return Err(format!("EQ preset {n} is empty or not read yet"));
+            }
+            Command::RenameSetup(_, ref name) | Command::SaveSetup(_, Some(ref name)) if !name.trim().is_empty() && crate::protocol::clean_name(name).is_empty() => {
+                return Err("the name has no printable characters".into());
+            }
+            Command::LoadSetup(n) | Command::SaveSetup(n, _) | Command::RenameSetup(n, _) if !(1..=9).contains(&n) => {
+                return Err(format!("no setup {n}"));
+            }
+            Command::Set(items) => {
+                if let Some((k, _)) = items.iter().find(|(k, _)| !crate::model::valid_key(k)) {
+                    return Err(format!("{k} is not a parameter"));
+                }
+                Command::Set(items)
             }
             c => c,
         };
@@ -189,10 +218,12 @@ impl Hub {
                     m.setups = vec![String::new(); 9];
                     m.presets = empty_presets();
                     m.status = None;
+                    m.revision = None;
                     tray_dirty = true;
                     json!({ "kind": "reset" })
                 }
                 Update::Device(d) => {
+                    let d = with_revision(d, m.revision);
                     if m.device == d {
                         return;
                     }
@@ -216,8 +247,10 @@ impl Hub {
                                 vols += 1;
                             }
                         }
-                        if k.ends_with(&format!(".{}", ids::EQ_ENABLE)) {
-                            tray_dirty = true;
+                        if let Some((a, i)) = crate::model::split_key(&k) {
+                            if i == ids::EQ_ENABLE && schema::channels().iter().any(|c| c.eq == a) {
+                                tray_dirty = true;
+                            }
                         }
                         changed.insert(k, json!(v));
                     }
@@ -252,6 +285,15 @@ impl Hub {
                 }
                 Update::Status(s) => {
                     m.status = Some(s.clone());
+                    if m.revision != Some(s.revision) {
+                        m.revision = Some(s.revision);
+                        let d = with_revision(m.device.clone(), m.revision);
+                        if d != m.device {
+                            m.device = d.clone();
+                            tray_dirty = true;
+                            let _ = self.app.emit("update", json!({ "kind": "device", "device": d }));
+                        }
+                    }
                     json!({ "kind": "status", "status": s })
                 }
             }
@@ -350,7 +392,7 @@ impl Hub {
                 loop {
                     let due = {
                         let u = hub.upd.lock().unwrap();
-                        u.checked_at.map_or(true, |t| now_secs().saturating_sub(t) >= update::EVERY.as_secs())
+                        u.checked_at.is_none_or(|t| now_secs().saturating_sub(t) >= update::EVERY.as_secs())
                     };
                     if due && hub.config().updates.check {
                         hub.check_updates(true);
@@ -425,6 +467,8 @@ impl Hub {
     pub fn volume_to(self: &Arc<Self>, ch: &str, target: i32) -> Result<(), String> {
         let c = schema::channel(ch).ok_or("unknown output")?;
         let cur = self.model.lock().unwrap().p.get(&vol_key(c)).copied().ok_or("volume not known yet")?;
+        // the output turned last, for the volume keys in "auto" mode
+        *self.last_out.lock().unwrap() = c.key.clone();
         let target = self.limit_raw(ch, target);
         let delta = target - cur;
         let mut moves = vec![(c.key.clone(), cur, target)];
@@ -609,7 +653,7 @@ impl Hub {
                 }
             }
         }
-        for p in sch["params"]["device"].as_array().unwrap() {
+        for p in sch["params"]["device"].as_array().unwrap().iter().filter(|p| p["type"] != "action") {
             if let Some(v) = m.p.get(&key(12, p["idx"].as_u64().unwrap() as u8)) {
                 put(&mut out, "device", p["id"].as_str().unwrap(), json!(schema::to_display(p, *v)));
             }
@@ -620,8 +664,14 @@ impl Hub {
     /// A command line from the socket (`open-adi2-control <args>`). Ok = text for stdout.
     pub fn cli(self: &Arc<Self>, args: &[String]) -> Result<String, String> {
         let a = |i: usize| args.get(i).map(|s| s.as_str()).unwrap_or("");
-        let model = self.model.lock().unwrap().device.model.clone().unwrap_or_else(|| "pro".into());
-        let fmt = |r: &schema::Resolved, raw: i32| schema::format_value(r.param, &model, r.channel, raw);
+        let (model, dac_mode) = {
+            let m = self.model.lock().unwrap();
+            let model = m.device.model.clone().unwrap_or_else(|| "pro".into());
+            // Basic Mode DAC (device 6 = 5) has its own Source list on the Pro models
+            let dac_mode = model != "dac" && m.p.get(&key(12, schema::idx("device", "basic"))) == Some(&5);
+            (model, dac_mode)
+        };
+        let fmt = |r: &schema::Resolved, raw: i32| schema::format_value(r.param, &model, r.channel, dac_mode, raw);
         match a(0) {
             "get" if args.len() == 1 => Ok(self.named_state().to_string()),
             "get" => {
@@ -646,10 +696,11 @@ impl Hub {
                 }
                 let k = key(r.addr, r.idx);
                 let cur = self.value(&k);
-                if self.usable() && cur.is_none() {
+                // (an action such as "toggleout" is sent only, never reported)
+                if self.usable() && cur.is_none() && r.param["type"] != "action" {
                     return Err(format!("this unit has no {id} on {ch}"));
                 }
-                let raw = schema::parse_value(r.param, &model, r.channel, text, cur)?;
+                let raw = schema::parse_value(r.param, &model, r.channel, dac_mode, text, cur)?;
                 self.set(vec![(k.clone(), raw)])?;
                 Ok(fmt(&r, self.value(&k).unwrap_or(raw)))
             }

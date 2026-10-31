@@ -173,20 +173,26 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
                         continue;
                     }
                 }
+                let me = Addr { client: seq.client_id().unwrap_or(0), port: s.my_port };
+                // both directions: the kernel opens the unit's MIDI output only while a
+                // port is connected to it, so SysEx sent without this connection is dropped
+                let connect = |from: Addr, to: Addr| -> alsa::Result<()> {
+                    let sub = PortSubscribe::empty()?;
+                    sub.set_sender(from);
+                    sub.set_dest(to);
+                    match seq.subscribe_port(&sub) {
+                        Err(e) if e.errno() == 16 => Ok(()), // EBUSY: already connected
+                        r => r,
+                    }
+                };
                 match (found, s.adi) {
+                    (Some(f), Some(_)) => {
+                        // still there; a connection removed by another program (PortUnsubscribed)
+                        // is made again
+                        let _ = connect(f.addr, me).and_then(|_| connect(me, f.addr));
+                        drop(s);
+                    }
                     (Some(f), None) => {
-                        let me = Addr { client: seq.client_id().unwrap_or(0), port: s.my_port };
-                        // both directions: the kernel opens the unit's MIDI output only while a
-                        // port is connected to it, so SysEx sent without this connection is dropped
-                        let connect = |from: Addr, to: Addr| -> alsa::Result<()> {
-                            let sub = PortSubscribe::empty()?;
-                            sub.set_sender(from);
-                            sub.set_dest(to);
-                            match seq.subscribe_port(&sub) {
-                                Err(e) if e.errno() == 16 => Ok(()), // EBUSY: already connected
-                                r => r,
-                            }
-                        };
                         match connect(f.addr, me).and_then(|_| connect(me, f.addr)) {
                             Ok(()) => {
                                 s.adi = Some(f.addr);
@@ -213,7 +219,6 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
                             Some(Problem::new("notfound", "No ADI-2 found. Connect it by USB and set MIDI Control to ON.")),
                         );
                     }
-                    _ => {}
                 }
             }
 
@@ -228,6 +233,10 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
             let adi = s.adi;
             let seq = s.seq.as_mut().unwrap();
             let mut input = seq.input();
+            let mut overrun = false;
+            // the unit's own client went away (it may come back under the same number
+            // before the next scan, which then finds nothing to do)
+            let mut lost = false;
             loop {
                 match input.event_input() {
                     Ok(ev) => match ev.get_type() {
@@ -239,12 +248,21 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
                             }
                         }
                         EventType::ClientStart | EventType::PortStart => rescan = true,
-                        EventType::ClientExit | EventType::PortExit | EventType::PortUnsubscribed => rescan = true,
+                        EventType::ClientExit | EventType::PortExit => {
+                            if let (Some(a), Some(cur)) = (ev.get_data::<Addr>(), adi) {
+                                if a.client == cur.client {
+                                    lost = true;
+                                }
+                            }
+                            rescan = true;
+                        }
+                        EventType::PortUnsubscribed => rescan = true,
                         _ => {}
                     },
                     Err(e) if e.errno() == libc_eagain() => break,
                     Err(e) if e.errno() == libc_enospc() => {
-                        // input buffer overrun: the kernel dropped events; a re-read fixes the model
+                        // input buffer overrun: the kernel dropped events
+                        overrun = true;
                         continue;
                     }
                     Err(_) => {
@@ -259,11 +277,19 @@ fn run(shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, engine: Sender<In>) {
                 }
             }
             drop(input);
+            if lost {
+                s.adi = None;
+            }
             drop(s);
             for d in buf_events.drain(..) {
                 if !send(&engine, LinkEvent::Data(d)) {
                     return;
                 }
+            }
+            if lost {
+                send(&engine, LinkEvent::Closed("unplugged".into()));
+            } else if overrun && adi.is_some() {
+                send(&engine, LinkEvent::Lost);
             }
         }
         sleep_unless(&stop, Duration::from_millis(500));

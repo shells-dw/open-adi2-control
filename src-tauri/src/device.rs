@@ -34,6 +34,8 @@ pub enum LinkEvent {
     Closed(String),
     Data(Vec<u8>),
     Problem(Option<Problem>),
+    /// the port dropped input (sequencer buffer overrun): the settings are read again
+    Lost,
 }
 
 pub enum In {
@@ -318,6 +320,11 @@ impl Engine {
                     self.on_sysex(&m);
                 }
             }
+            LinkEvent::Lost => {
+                self.splitter = p::Splitter::default();
+                self.refresh();
+                self.request_presets_after(Duration::from_millis(500));
+            }
         }
     }
 
@@ -436,7 +443,8 @@ impl Engine {
         self.rx_rme += 1;
         match self.id {
             None => {
-                if Some(m.id) == self.probing {
+                // an answer to an earlier probe counts too (the unit answers only its own ID)
+                if self.probing.is_some() && matches!(m.id, p::ID_DAC | p::ID_PRO | p::ID_SE) {
                     self.identified(m.id);
                 } else {
                     return;
@@ -462,7 +470,7 @@ impl Engine {
                 let i = (n - 1) as usize;
                 if self.setups[i] != name {
                     self.setups[i] = name;
-                    if n == 9 || self.ready {
+                    if self.ready && n != 9 {
                         self.emit(Update::Setups(self.setups.clone()));
                     }
                 }
@@ -480,12 +488,10 @@ impl Engine {
                     self.presets_changed();
                 }
             }
-            Msg::Status(data) => {
-                if self.last_status.as_deref() != Some(&data[..]) {
-                    self.last_status = Some(data.clone());
-                    if let Some(s) = p::parse_status(&data) {
-                        self.emit(Update::Status(s));
-                    }
+            Msg::Status(data) if self.last_status.as_deref() != Some(&data[..]) => {
+                self.last_status = Some(data.clone());
+                if let Some(s) = p::parse_status(&data) {
+                    self.emit(Update::Status(s));
                 }
             }
             _ => {}
@@ -497,7 +503,8 @@ impl Engine {
         let mut presets_touched = false;
         for q in &params {
             // EQ preset data (13 = left, 14 = right) is not a live setting
-            if q.addr == p::PRESET_ADDR_L && q.idx == p::PRESET_FLAG_IDX {
+            // (the unit sends it at index 1, the table says 2; index 2 is never data on address 13)
+            if q.addr == p::PRESET_ADDR_L && (q.idx == p::PRESET_FLAG_IDX || q.idx == p::PRESET_STORE_IDX) {
                 // the flags word comes first; that preset's data follows
                 let f = p::decode_preset_flag(q.value);
                 self.preset_cursor = Some(f.n);
@@ -833,5 +840,36 @@ mod tests {
         tx.send(In::Cmd(Command::RenameSetup(4, "Late".into()))).unwrap();
         until(&seen, "setup name", |s| s.setups[3] == "Late");
         let _ = tx.send(In::Stop);
+    }
+
+    struct Null;
+    impl Transport for Null {
+        fn write(&self, _: &[u8]) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn preset_flags_word_at_either_index() {
+        // the unit sends the flags word at index 1, the table lists index 2
+        let mut e = Engine::new(Box::new(Null), Box::new(|_| {}));
+        for idx in [p::PRESET_FLAG_IDX, p::PRESET_STORE_IDX] {
+            let n = idx + 4;
+            e.on_params(vec![
+                Param { addr: p::PRESET_ADDR_L, idx, value: p::encode_preset_flag(n, true) },
+                Param { addr: p::PRESET_ADDR_L, idx: 4, value: 7 },
+                Param { addr: p::PRESET_ADDR_R, idx: 4, value: -3 },
+            ]);
+            let e2 = &e.presets[(n - 1) as usize];
+            assert_eq!(e2.empty, Some(false));
+            assert!(e2.dual);
+            assert_eq!(e2.l.get(&4), Some(&7));
+            assert_eq!(e2.r.get(&4), Some(&-3));
+            assert!(e.state.is_empty(), "preset data is not a live setting");
+        }
+        // an empty slot clears stored data
+        e.on_params(vec![Param { addr: p::PRESET_ADDR_L, idx: p::PRESET_FLAG_IDX, value: ((5 - 1) << 4) | 0xf }]);
+        assert_eq!(e.presets[4].empty, Some(true));
+        assert!(e.presets[4].l.is_empty());
     }
 }

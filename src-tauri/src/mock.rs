@@ -34,6 +34,8 @@ struct StoredPreset {
 }
 
 struct Unit {
+    /// ADI-2/4 Pro EX: device revision 1 in the status message
+    ex: bool,
     id: u8,
     state: BTreeMap<(u8, u8), i32>,
     setups: Vec<String>,
@@ -55,7 +57,7 @@ fn defaults(model: &str) -> BTreeMap<(u8, u8), i32> {
         let section = if c["kind"] == "input" { "input" } else { "output" };
         let line = c["line"].as_bool().unwrap_or(false);
         for prm in s["params"][section].as_array().unwrap() {
-            if !schema::available(prm, model) || (prm["lineOnly"].as_bool().unwrap_or(false) && !line) {
+            if !schema::available(prm, model) || !schema::on_channel(prm, c["key"].as_str().unwrap_or("")) {
                 continue;
             }
             st.insert((addr, prm["idx"].as_u64().unwrap() as u8), 0);
@@ -64,7 +66,7 @@ fn defaults(model: &str) -> BTreeMap<(u8, u8), i32> {
             st.insert((addr, 12), if line { -200 } else { -300 }); // volume
             st.insert((addr, 21), 14); // loudness bass +7 dB
             st.insert((addr, 22), 14);
-            st.insert((addr, 23), -300);
+            st.insert((addr, 23), -60); // Low Vol Ref -30 dB (0.5 dB steps)
             st.insert((addr, 2), 1);
             st.insert((addr, 18), 2); // DC protection: Filter
             st.insert((addr, 5), 100); // width 1.00
@@ -77,6 +79,9 @@ fn defaults(model: &str) -> BTreeMap<(u8, u8), i32> {
                 if side == "eqR" && !(3..=19).contains(&idx) {
                     continue; // B/T and preset select only on the left address
                 }
+                if c["kind"] == "input" && (20..=26).contains(&idx) {
+                    continue; // the input has no Bass/Treble
+                }
                 let v = eq_def[idx.to_string()].as_i64().unwrap_or(0) as i32;
                 st.insert((ea, idx), v);
             }
@@ -85,7 +90,7 @@ fn defaults(model: &str) -> BTreeMap<(u8, u8), i32> {
         }
     }
     for prm in s["params"]["device"].as_array().unwrap() {
-        if schema::available(prm, model) {
+        if schema::available(prm, model) && prm["type"] != "action" {
             st.insert((12, prm["idx"].as_u64().unwrap() as u8), 0);
         }
     }
@@ -128,6 +133,7 @@ pub fn start(model: &str, engine: Sender<In>) -> MockTransport {
         .name("demo-unit".into())
         .spawn(move || {
             let mut u = Unit {
+                ex: model == "ex",
                 id: p::id_of(&model),
                 state: defaults(&model),
                 setups: (1..=9).map(|n| if n <= 3 { ["Speakers", "Headphones", "Night"][n - 1].to_string() } else { format!("Setup {n}") }).collect(),
@@ -139,7 +145,9 @@ pub fn start(model: &str, engine: Sender<In>) -> MockTransport {
             let send = |bytes: Vec<u8>| engine.send(In::Link(LinkEvent::Data(bytes))).is_ok();
             let name = format!("Demo {}", schema::model_name(&model));
             std::thread::sleep(Duration::from_millis(30));
-            let _ = engine.send(In::Link(LinkEvent::Open { port: name, hint: Some(model.clone()) }));
+            // (the ADI-2/4 Pro EX answers as the SE; its status message tells them apart)
+            let hint = p::model_of(p::id_of(&model)).to_string();
+            let _ = engine.send(In::Link(LinkEvent::Open { port: name, hint: Some(hint) }));
             let mut active = false;
             let mut next_status = Instant::now();
             let mut splitter = p::Splitter::default();
@@ -181,7 +189,9 @@ pub fn start(model: &str, engine: Sender<In>) -> MockTransport {
 impl Unit {
     fn status(&self) -> Vec<u8> {
         let mode = self.state.get(&(12, 6)).copied().unwrap_or(2) as u8;
-        vec![0x01, 0, 0, 0, 0, 0, 0, 0, 0, mode & 0x7, 0x02, 0x0a, 0, 0]
+        // byte 6: active output 1, revision; IOStatus1: clock internal (3), 48 kHz, phones 1 plugged
+        let b6 = 0x01 | if self.ex { 1 << 2 } else { 0 };
+        vec![b6, 0x40, 0x01, 0x08, 0x01, 0, 0, 0, 0, mode & 0x7, 0x01, 0, 0]
     }
 
     fn dump(&self) -> Vec<Vec<u8>> {
@@ -318,5 +328,21 @@ impl Unit {
             Some(pm) => self.handle(pm),
             None => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_status() {
+        let u = Unit { ex: true, id: p::ID_SE, state: defaults("ex"), setups: vec![], presets: vec![], temp_l: BTreeMap::new(), temp_r: BTreeMap::new(), temp_name: None };
+        let s = p::parse_status(&u.status()).unwrap();
+        assert_eq!(s.revision, 1);
+        assert_eq!((s.clock, s.int_rate), (3, 2));
+        assert!(s.ph1_plug && !s.ph2_plug);
+        assert!(u.state.contains_key(&(0, 13)), "Bal. Impedance on the EX");
+        assert!(!u.state.contains_key(&(12, 63)), "no state for the toggle action");
     }
 }

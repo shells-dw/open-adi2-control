@@ -15,8 +15,15 @@ pub struct Connection {
     pub pi_address: String,
     /// ADI-2-Pi access key ('' = none); the settings file is readable by the user only
     pub pi_key: String,
-    /// demo unit: "pro" | "se" | "dac"
+    /// demo unit: "pro" | "se" | "ex" | "dac"
     pub demo_model: String,
+}
+
+impl Connection {
+    /// The same unit is reached: mode, address, key and demo model agree (the name is a label).
+    pub fn same_target(&self, other: &Connection) -> bool {
+        self.mode == other.mode && self.pi_address == other.pi_address && self.pi_key == other.pi_key && self.demo_model == other.demo_model
+    }
 }
 
 impl Default for Connection {
@@ -60,7 +67,8 @@ pub struct Volume {
     /// limit how fast the app raises the volume, dB/s (0 = off)
     pub rise: f64,
     /// volume for the Recall button per output, dB
-    pub recall: BTreeMap<String, f64>,
+    /// Recall volume per output, dB (missing/null = none)
+    pub recall: BTreeMap<String, Option<f64>>,
     /// volume keys and tray: step in dB
     pub step: f64,
 }
@@ -202,7 +210,19 @@ fn file() -> PathBuf {
 
 impl Config {
     pub fn load() -> Config {
-        let mut c: Config = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut c = match std::fs::read_to_string(file()) {
+            Ok(text) => match serde_json::from_str::<Config>(&text) {
+                Ok(c) => c,
+                Err(e) => {
+                    // the file is kept for the user; the defaults are saved under the normal name
+                    let bad = file().with_extension("json.bad");
+                    let _ = std::fs::rename(file(), &bad);
+                    eprintln!("settings file not readable ({e}); kept as {}", bad.display());
+                    Config::default()
+                }
+            },
+            Err(_) => Config::default(),
+        };
         c.migrate();
         c
     }
@@ -303,5 +323,16 @@ mod tests {
         // a patch keeps the migrated shape
         let p = c.patched(&serde_json::json!({ "volume": { "profile": 5 } })).unwrap();
         assert_eq!(p.volume.profile, 0);
+        // a recall volume can be cleared with null
+        let p = c.patched(&serde_json::json!({ "volume": { "recall": { "line": -20.0 } } })).unwrap();
+        assert_eq!(p.volume.recall["line"], Some(-20.0));
+        let p = p.patched(&serde_json::json!({ "volume": { "recall": { "line": null } } })).unwrap();
+        assert_eq!(p.volume.recall["line"], None);
+        // renaming a connection is not a different unit
+        let mut a = Connection::default();
+        let b = Connection { name: "Desk".into(), ..a.clone() };
+        assert!(a.same_target(&b));
+        a.mode = "pi".into();
+        assert!(!a.same_target(&b));
     }
 }

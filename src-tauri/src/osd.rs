@@ -116,7 +116,7 @@ fn notify(info: &Info) -> bool {
         "Notify",
         &("Open ADI-2 Control", NOTIFY_ID.load(Ordering::SeqCst), icon, info.title.as_str(), info.value.as_str(), actions, hints, 1500i32),
     );
-    match reply.and_then(|m| m.body().deserialize::<u32>().map_err(Into::into)) {
+    match reply.and_then(|m| m.body().deserialize::<u32>()) {
         Ok(id) => {
             NOTIFY_ID.store(id, Ordering::SeqCst);
             true
